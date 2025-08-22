@@ -8,6 +8,8 @@ dist/
 # Local databases and caches
 database/*.db
 database/*.sqlite
+anki_cache.db
+embeddings.db
 
 # Env and secrets
 .env

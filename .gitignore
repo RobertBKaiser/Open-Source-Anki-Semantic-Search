@@ -1,0 +1,25 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+.eslintcache
+
+# Local databases and caches
+database/*.db
+database/*.sqlite
+
+# Env and secrets
+.env
+.env.*
+
+# OS/Editor
+.idea/
+.vscode/
+
+node_modules
+dist
+out
+.DS_Store
+.eslintcache
+*.log*

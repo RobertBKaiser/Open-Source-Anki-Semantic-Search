@@ -1,4 +1,6 @@
-import React, { useEffect, useRef } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
+import renderMathInElement from 'katex/contrib/auto-render/auto-render'
+import 'katex/dist/katex.min.css'
 
 type NoteListItem = {
   note_id: number
@@ -11,6 +13,10 @@ type NoteListItem = {
   jaccard?: number
   where?: 'front' | 'back' | 'both'
   rerank?: number
+  rerank_in?: number
+  rerank_out?: number
+  rerank_related?: number
+  rerank_category?: 'in' | 'out' | 'related'
 }
 
 type NoteListProps = {
@@ -18,9 +24,10 @@ type NoteListProps = {
   selectedId: number | null
   onSelect: (noteId: number) => void
   onEndReached?: () => void
-  mode?: 'default' | 'exact' | 'fuzzy' | 'rerank' | 'semantic'
+  mode?: 'default' | 'exact' | 'fuzzy' | 'rerank' | 'semantic' | 'hybrid'
   selectedIds?: number[]
   onToggleSelect?: (noteId: number, selected: boolean) => void
+  groups?: Array<{ keyword: string; notes: NoteListItem[]; kcos?: number; gbm25?: number }>
 }
 
 function decodeEntities(input: string): string {
@@ -97,7 +104,7 @@ function renderFieldPreview(value: string | null): React.ReactNode {
   return parts
 }
 
-export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'default', selectedIds = [], onToggleSelect }: NoteListProps): React.JSX.Element {
+export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'default', selectedIds = [], onToggleSelect, groups }: NoteListProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -125,6 +132,25 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
 
   function ScoreBadges(n: any): React.ReactNode {
     const jacMeta = formatJaccardPercent(n.jaccard)
+    // Numeric badge chip (0..3)
+    if (typeof (n as any).badge_num === 'number') {
+      const bn = Number((n as any).badge_num)
+      const label = bn === 0 ? 'Hit' : bn === 1 ? 'Very Related' : bn === 2 ? 'Somewhat Related' : 'Not Related'
+      const cls = bn === 0
+        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+        : bn === 1
+          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+          : bn === 2
+            ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+            : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
+      return (
+        <div className="flex items-center gap-1 ml-2">
+          <span className={`text-[11px] rounded-md px-1.5 py-0.5 ${cls}`} title="LLM badge (0 best, 3 worst)">
+            {label}
+          </span>
+        </div>
+      )
+    }
     if (mode === 'semantic') {
       return (
         <div className="flex items-center gap-1 ml-2">
@@ -150,6 +176,27 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
               Rerank: {Number(n.rerank).toFixed(3)}
             </span>
           )}
+        </div>
+      )
+    }
+    if (mode === 'hybrid') {
+      return (
+        <div className="flex items-center gap-1 ml-2">
+          {typeof (n as any).score === 'number' && (() => {
+            const s = Number((n as any).score)
+            const pct = Math.max(0, Math.min(100, s * 100))
+            const cos = typeof (n as any).cos === 'number' ? Number((n as any).cos) : NaN
+            const bm = typeof (n as any).bm25 === 'number' ? Number((n as any).bm25) : (typeof (n as any).bm25 === 'undefined' && typeof (n as any).bm25 !== 'number' && typeof (n as any).bm25 !== 'undefined' ? Number.NaN : Number((n as any).bm25))
+            const tt = `Cosine: ${Number.isFinite(cos) ? cos.toFixed(3) : '—'} • BM25: ${Number.isFinite(bm) ? bm.toFixed(2) : '—'}`
+            return (
+              <span
+                className="text-[11px] rounded-md px-1.5 py-0.5 bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300"
+                title={tt}
+              >
+                Similarity: {pct.toFixed(1)}%
+              </span>
+            )
+          })()}
         </div>
       )
     }
@@ -199,14 +246,50 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
     )
   }
 
-  return (
-    <div ref={containerRef} className="min-h-0 h-full overflow-y-auto divide-y">
-      {notes.map((n) => (
+  function PreviewText({ value }: { value: string | null }) {
+    const ref = useRef<HTMLSpanElement | null>(null)
+    const nodes = useMemo(() => renderFieldPreview(value), [value])
+    useEffect(() => {
+      const el = ref.current
+      if (!el) return
+      try {
+        renderMathInElement(el, {
+          delimiters: [
+            { left: '$$', right: '$$', display: true },
+            { left: '\\[', right: '\\]', display: true },
+            { left: '\\(', right: '\\)', display: false },
+            { left: '$', right: '$', display: false },
+          ],
+          throwOnError: false,
+          trust: true,
+        })
+      } catch {}
+    }, [nodes])
+    return <span ref={ref} className="text-sm flex-1 truncate">{nodes}</span>
+  }
+
+  const renderRow = (n: NoteListItem) => (
         <button
           key={n.note_id}
           onClick={() => onSelect(n.note_id)}
-          className={`w-full text-left px-3 py-1 truncate ${selectedId === n.note_id ? 'bg-sidebar-accent' : ''}`}
+          className={`relative w-full text-left px-3 py-1 truncate ${selectedId === n.note_id ? 'bg-sidebar-accent' : ''}`}
         >
+          {/* Left color badge for classification (shows when set) */}
+          {(typeof (n as any).badge_num === 'number' || n.rerank_category) && (
+            <span
+              className="absolute left-0 top-0 bottom-0 w-[6px] rounded-r-sm"
+              style={{
+                backgroundColor: (() => {
+                  const num = (n as any).badge_num
+                  if (typeof num === 'number') {
+                    // 0 green, 1 blue, 2 amber, 3 gray
+                    return num === 0 ? '#10b981' : num === 1 ? '#3b82f6' : num === 2 ? '#f59e0b' : '#9ca3af'
+                  }
+                  return n.rerank_category === 'in' ? '#ff3b30' : n.rerank_category === 'out' ? '#000000' : n.rerank_category === 'related' ? '#3b82f6' : 'transparent'
+                })()
+              }}
+            />
+          )}
           <div className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -220,13 +303,53 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
               }}
               onClick={(e) => e.stopPropagation()}
             />
-            <span className="text-sm flex-1 truncate">{renderFieldPreview(n.first_field)}</span>
+            <PreviewText value={n.first_field} />
+            {/* Overlap chips */}
+            {Array.isArray((n as any).__overlaps) && (n as any).__overlaps.length > 0 && (
+              <div className="ml-auto flex items-center gap-1">
+                {(n as any).__overlaps.map((o: any, idx: number) => (
+                  <span key={idx} className="text-[10px] rounded-md px-1 py-[1px] bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300" title={`Also matches ${o.keyword}`}>
+                    {o.keyword} {(o.cos * 100).toFixed(1)}%
+                  </span>
+                ))}
+              </div>
+            )}
             {ScoreBadges(n)}
           </div>
         </button>
-      ))}
+  )
+
+  if (Array.isArray(groups) && groups.length > 0) {
+    return (
+      <div ref={containerRef} className="min-h-0 h-full overflow-y-auto">
+        {groups.map((g) => (
+          <div key={g.keyword} className="mb-3">
+            <div className="sticky top-0 z-10 px-3 py-1.5 text-xs font-semibold">
+              <span className="inline-flex items-center gap-2 rounded-full px-2 py-0.5 bg-blue-600 text-white shadow">
+                <span>{g.keyword}</span>
+                {typeof g.kcos === 'number' && g.kcos >= 0 && (
+                  <span className="text-[10px] rounded bg-white/20 px-1 py-[1px]">{(g.kcos * 100).toFixed(1)}%</span>
+                )}
+                {typeof g.gbm25 === 'number' && (
+                  <span className="text-[10px] rounded bg-white/20 px-1 py-[1px]">BM25 {g.gbm25.toFixed(2)}</span>
+                )}
+              </span>
+            </div>
+            <div className="mt-1 rounded-lg border bg-white/70 dark:bg-zinc-900/30 divide-y shadow-sm">
+              {g.notes
+                .slice()
+                .sort((a: any, b: any) => (b?.__gcos ?? -1) - (a?.__gcos ?? -1))
+                .map((n) => renderRow(n))}
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div ref={containerRef} className="min-h-0 h-full overflow-y-auto divide-y">
+      {notes.map((n) => renderRow(n))}
     </div>
   )
 }
-
-

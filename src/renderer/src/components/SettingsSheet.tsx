@@ -22,7 +22,12 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
 
   const [query, setQuery] = useState<string>('*')
   const [apiKey, setApiKey] = useState<string>('')
-  const [instruction, setInstruction] = useState<string>('Given a search query, retrieve relevant anki cards.')
+  const [openaiKey, setOpenaiKey] = useState<string>('')
+  const [promptUrl, setPromptUrl] = useState<string>('')
+  const [kwPromptId, setKwPromptId] = useState<string>('')
+  const [instructionIn, setInstructionIn] = useState<string>('Given a query document, rank cards by facts a reader would know after reading the document.')
+  const [instructionOut, setInstructionOut] = useState<string>('Given a query document, rank cards by facts that are not in the document at all.')
+  const [instructionRelated, setInstructionRelated] = useState<string>('Given a query document, rank cards by facts and ideas not explicitly stated but closely related to the document.')
   const [embedProgress, setEmbedProgress] = useState<{ total: number; embedded: number; pending: number; errors: number; rate: number; etaSeconds: number } | null>(null)
   const [activeTab, setActiveTab] = useState<string>('general')
 
@@ -31,8 +36,19 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
     try {
       const k = window.api.getSetting('deepinfra_api_key') || ''
       setApiKey(k)
-      const instr = window.api.getSetting('deepinfra_instruction') || 'Given a search query, retrieve relevant anki cards.'
-      setInstruction(instr)
+      const ok = window.api.getSetting('openai_api_key') || ''
+      setOpenaiKey(ok)
+      // Prefer new key 'openai_badge_prompt_id', but fall back to legacy 'openai_badge_prompt_url'
+      const pu = window.api.getSetting('openai_badge_prompt_id') || window.api.getSetting('openai_badge_prompt_url') || ''
+      setPromptUrl(pu)
+      const kp = window.api.getSetting('openai_kw_prompt_id') || 'pmpt_68b5ad09507c8195999c456bd50afd3809e0e005559ce008'
+      setKwPromptId(kp)
+      const instrIn = window.api.getSetting('deepinfra_instruction_facts_in_query') || 'Given a query document, rank cards by facts a reader would know after reading the document.'
+      const instrOut = window.api.getSetting('deepinfra_instruction_not_in_query') || 'Given a query document, rank cards by facts that are not in the document at all.'
+      const instrRel = window.api.getSetting('deepinfra_instruction_related') || 'Given a query document, rank cards by facts and ideas not explicitly stated but closely related to the document.'
+      setInstructionIn(instrIn)
+      setInstructionOut(instrOut)
+      setInstructionRelated(instrRel)
       if (activeTab === 'embeddings') {
         const p = window.api.getEmbeddingProgress()
         setEmbedProgress(p)
@@ -120,18 +136,76 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
             <div className="text-xs text-muted-foreground">
               Used for reranking with Qwen3 Reranker 8B. Stored locally in `app_settings`.
             </div>
-            <label className="text-sm font-medium mt-4 block">Reranker Instruction</label>
-            <textarea
-              className="px-3 py-2 rounded-md bg-background border w-full h-20"
-              value={instruction}
+            <label className="text-sm font-medium mt-4 block">OpenAI API Key</label>
+            <input
+              className="px-3 py-2 rounded-md bg-background border w-full"
+              value={openaiKey}
               onChange={(e) => {
                 const v = e.target.value
-                setInstruction(v)
-                try { window.api.setSetting('deepinfra_instruction', v) } catch { /* ignore */ }
+                setOpenaiKey(v)
+                try { window.api.setSetting('openai_api_key', v) } catch { /* ignore */ }
               }}
+              placeholder="sk-..."
             />
-            <div className="text-xs text-muted-foreground">
-              Default: "Given a search query, retrieve relevant anki cards." This is sent as the `instruction` to the reranker API to guide scoring.
+            <label className="text-sm font-medium mt-2 block">Badge Prompt ID</label>
+            <input
+              className="px-3 py-2 rounded-md bg-background border w-full"
+              value={promptUrl}
+              onChange={(e) => {
+                const v = e.target.value
+                setPromptUrl(v)
+                try { window.api.setSetting('openai_badge_prompt_id', v) } catch { /* ignore */ }
+              }}
+              placeholder="pmpt_..."
+            />
+            <label className="text-sm font-medium mt-2 block">Keyword Prompt ID</label>
+            <input
+              className="px-3 py-2 rounded-md bg-background border w-full"
+              value={kwPromptId}
+              onChange={(e) => {
+                const v = e.target.value
+                setKwPromptId(v)
+                try { window.api.setSetting('openai_kw_prompt_id', v) } catch { /* ignore */ }
+              }}
+              placeholder="pmpt_..."
+            />
+            <div className="grid grid-cols-1 gap-3 mt-2">
+              <div>
+                <label className="text-sm font-medium">Instruction: Facts in query (red badge)</label>
+                <textarea
+                  className="px-3 py-2 rounded-md bg-background border w-full h-20"
+                  value={instructionIn}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setInstructionIn(v)
+                    try { window.api.setSetting('deepinfra_instruction_facts_in_query', v) } catch { /* ignore */ }
+                  }}
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Instruction: Facts not in query (black badge)</label>
+                <textarea
+                  className="px-3 py-2 rounded-md bg-background border w-full h-20"
+                  value={instructionOut}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setInstructionOut(v)
+                    try { window.api.setSetting('deepinfra_instruction_not_in_query', v) } catch { /* ignore */ }
+                  }}
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium">Instruction: Closely related (blue badge)</label>
+                <textarea
+                  className="px-3 py-2 rounded-md bg-background border w-full h-20"
+                  value={instructionRelated}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setInstructionRelated(v)
+                    try { window.api.setSetting('deepinfra_instruction_related', v) } catch { /* ignore */ }
+                  }}
+                />
+              </div>
             </div>
           </TabsContent>
           <TabsContent value="embeddings" className="mt-4 space-y-3 text-sm">

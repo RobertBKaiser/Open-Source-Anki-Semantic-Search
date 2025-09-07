@@ -25,3 +25,6 @@ out
 .DS_Store
 .eslintcache
 *.log*
+database/anki_cache.db-shm
+database/anki_cache.db-wal
+database/embeddings.db-shm

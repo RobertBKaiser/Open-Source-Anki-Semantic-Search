@@ -98,17 +98,14 @@ const updateNoteHash = db.prepare(`UPDATE notes SET content_hash = ?, mod = ?, s
 // Ensure search indexes exist (matching preload `_ensureSearchIndexes` schema)
 db.exec(
   `CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(content, note_id UNINDEXED, tokenize='unicode61');
-   CREATE TABLE IF NOT EXISTS note_trigrams (
-     note_id INTEGER NOT NULL,
-     trigram TEXT NOT NULL,
-     PRIMARY KEY (note_id, trigram)
-   );`
+   CREATE INDEX IF NOT EXISTS idx_note_fields_note_ord ON note_fields(note_id, ord);`
 )
 
 const deleteFtsFor = db.prepare(`DELETE FROM note_fts WHERE note_id = ?`)
 const insertFts = db.prepare(`INSERT OR REPLACE INTO note_fts(content, note_id) VALUES (?, ?)`)
-const deleteTrigramsFor = db.prepare(`DELETE FROM note_trigrams WHERE note_id = ?`)
-const insertTrigram = db.prepare(`INSERT OR IGNORE INTO note_trigrams(note_id, trigram) VALUES (?, ?)`)
+// Trigram maintenance disabled for performance
+const deleteTrigramsFor = { run() {} }
+const insertTrigram = { run() {} }
 
 function normalizeHtml(html) {
   if (!html) return ''
@@ -152,17 +149,7 @@ function updateIndexesFor(noteId, note) {
   insertFts.run(front, noteId)
   // Rebuild trigrams for this note
   deleteTrigramsFor.run(noteId)
-  const t = front
-  const seen = new Set()
-  for (let i = 0; i < t.length - 2; i++) {
-    const tri = t.slice(i, i + 3)
-    if (!/\s{3,}/.test(tri)) {
-      if (!seen.has(tri)) {
-        seen.add(tri)
-        insertTrigram.run(noteId, tri)
-      }
-    }
-  }
+  // Trigram computation disabled
 }
 
 const insertNotesTxn = db.transaction((notes) => {

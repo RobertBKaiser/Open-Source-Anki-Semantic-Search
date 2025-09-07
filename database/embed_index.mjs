@@ -12,6 +12,7 @@
 import Database from 'better-sqlite3'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import crypto from 'node:crypto'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -62,10 +63,52 @@ function setSetting(key, value) {
   embedDb.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key, String(value))
 }
 
+function getSetting(key) {
+  const row = embedDb.prepare('SELECT value FROM settings WHERE key=?').get(key)
+  return row?.value ?? null
+}
+
 function now() { return Math.floor(Date.now() / 1000) }
 
 // Reset stuck jobs
 embedDb.prepare(`UPDATE embed_jobs SET status='pending', started_at=NULL WHERE status='in_progress'`).run()
+
+function frontHashFromText(text) {
+  const t = String(text || '')
+  return crypto.createHash('sha256').update(t).digest('hex')
+}
+
+// One-time migration: ensure embeddings.hash reflects FRONT-ONLY normalized text
+;(function migrateHashSchemeIfNeeded() {
+  try {
+    const scheme = getSetting('hash_scheme') || 'content_v1'
+    if (scheme === 'front_v1') return
+    const ids = embedDb.prepare('SELECT note_id FROM embeddings').all().map((r) => r.note_id)
+    if (!ids.length) { setSetting('hash_scheme', 'front_v1'); return }
+    const chunk = 500
+    const update = embedDb.prepare('UPDATE embeddings SET hash=? WHERE note_id=?')
+    for (let i = 0; i < ids.length; i += chunk) {
+      const part = ids.slice(i, i + chunk)
+      const qMarks = part.map(() => '?').join(',')
+      const rows = cacheDb.prepare(`
+        SELECT n.note_id,
+               (SELECT nf.value_html FROM note_fields nf WHERE nf.note_id = n.note_id ORDER BY ord ASC LIMIT 1) AS front
+        FROM notes n WHERE n.note_id IN (${qMarks})
+      `).all(...part)
+      const tx = embedDb.transaction((items) => {
+        for (const r of items) {
+          const text = normalizeHtml(r.front || '')
+          const fh = frontHashFromText(text)
+          update.run(fh, r.note_id)
+        }
+      })
+      tx(rows)
+    }
+    setSetting('hash_scheme', 'front_v1')
+  } catch (e) {
+    // best-effort; ignore
+  }
+})()
 
 function normalizeHtml(html) {
   if (!html) return ''
@@ -85,31 +128,40 @@ function normalizeHtml(html) {
 function enqueue(rebuild) {
   const t = now()
   if (rebuild) {
-    // Enqueue all notes
+    // Enqueue all notes with FRONT-ONLY hash
     const rows = cacheDb.prepare(`
-      SELECT n.note_id, n.content_hash AS hash,
+      SELECT n.note_id,
              (SELECT nf.value_html FROM note_fields nf WHERE nf.note_id = n.note_id ORDER BY ord ASC LIMIT 1) AS front
       FROM notes n
     `).all()
     const ins = embedDb.prepare(`INSERT INTO embed_jobs(note_id, hash, status, enqueued_at) VALUES(?,?, 'pending', ?) ON CONFLICT(note_id) DO UPDATE SET hash=excluded.hash, status='pending', enqueued_at=excluded.enqueued_at`)
-    const tx = embedDb.transaction((items) => { for (const r of items) ins.run(r.note_id, r.hash || '', t) })
+    const tx = embedDb.transaction((items) => {
+      for (const r of items) {
+        const text = normalizeHtml(r.front || '')
+        const fh = frontHashFromText(text)
+        ins.run(r.note_id, fh, t)
+      }
+    })
     tx(rows)
     return rows.length
   }
-  // Non-rebuild: only enqueue notes missing in embeddings.db or with stale hash
+  // Non-rebuild: only enqueue notes missing in embeddings.db or with stale FRONT-ONLY hash
   const embRows = embedDb.prepare(`SELECT note_id, hash FROM embeddings`).all()
   const embById = new Map(embRows.map((r) => [r.note_id, r.hash]))
   const allCache = cacheDb.prepare(`
-    SELECT n.note_id, n.content_hash AS hash,
+    SELECT n.note_id,
            (SELECT nf.value_html FROM note_fields nf WHERE nf.note_id = n.note_id ORDER BY ord ASC LIMIT 1) AS front
     FROM notes n
   `).all()
-  const toEnqueue = allCache.filter((r) => {
-    const h = embById.get(r.note_id)
-    return !h || h !== (r.hash || '')
-  })
+  const toEnqueue = []
+  for (const r of allCache) {
+    const text = normalizeHtml(r.front || '')
+    const fh = frontHashFromText(text)
+    const prev = embById.get(r.note_id) || null
+    if (!prev || prev !== fh) toEnqueue.push({ note_id: r.note_id, hash: fh })
+  }
   const ins = embedDb.prepare(`INSERT INTO embed_jobs(note_id, hash, status, enqueued_at) VALUES(?,?, 'pending', ?) ON CONFLICT(note_id) DO UPDATE SET hash=excluded.hash, status='pending', enqueued_at=excluded.enqueued_at`)
-  const tx = embedDb.transaction((items) => { for (const r of items) ins.run(r.note_id, r.hash || '', t) })
+  const tx = embedDb.transaction((items) => { for (const r of items) ins.run(r.note_id, r.hash, t) })
   tx(toEnqueue)
   return toEnqueue.length
 }

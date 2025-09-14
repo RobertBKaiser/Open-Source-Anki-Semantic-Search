@@ -2,6 +2,8 @@
 
 An Electron desktop app that brings fast fuzzy search, semantic reranking, and embedding-based search to your Anki notes. Built with Electron, React, TypeScript, and SQLite.
 
+<img width="1710" height="1068" alt="Screenshot 2025-09-14 at 12 46 50 PM" src="https://github.com/user-attachments/assets/73bee340-2ed6-435c-876f-d3ef3d2c8f38" />
+
 Features
 - Exact search (boolean AND across fields)
 - Fuzzy search (BM25 per-keyword + RRF)
@@ -13,15 +15,6 @@ Features
 Requirements
 - Anki with AnkiConnect enabled (default `http://127.0.0.1:8765`)
 - DeepInfra API key for reranker/embeddings
-
-## Install
-
-Downloads
-- macOS (Apple Silicon): once a GitHub Release is published, download the `.dmg` from Releases and drag the app to Applications.
-- Windows / Linux: build locally for now (see Build). We’ll attach installers in Releases soon.
-
-macOS Gatekeeper (unsigned builds)
-- If macOS warns the app is from an unidentified developer: Right‑click the app → Open → Open. Or System Settings → Privacy & Security → “Allow Anyway”.
 
 ## Quick start tutorial
 
@@ -51,23 +44,6 @@ macOS Gatekeeper (unsigned builds)
 6) Actions
 - Multi‑select notes with the checkboxes. Click “Unsuspend (N)” to unsuspend via AnkiConnect.
 
-## Build from source
-Setup
-```bash
-npm install
-npm run dev
-```
-
-Build
-```bash
-# macOS
-npm run build:mac
-# Windows
-npm run build:win
-# Linux
-npm run build:linux
-```
-
 Configuration
 - Open Settings in the app to set the DeepInfra API key and reranker instruction.
 - Embedding indexer runs as a background worker; progress is visible in Settings.
@@ -81,16 +57,8 @@ Security & Privacy
 - No keys are hardcoded. Keys are stored locally in `app_settings` (SQLite).
 - Local databases (`database/*.db`) are ignored by git.
 
-License
-MIT — see `LICENSE`.
-
 Contributing
-- PRs welcome! Please run `npm run lint` and `npm run typecheck` before submitting.
-
-
-## Recommended IDE Setup
-
-- [VSCode](https://code.visualstudio.com/) + [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) + [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)
+- PRs welcome!
 
 ## Project Setup
 

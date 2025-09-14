@@ -34,6 +34,14 @@ declare global {
         bm25?: number
         matched?: number
       }>>
+      hybridSemanticModulatedFromNote(noteId: number, limit?: number): Promise<Array<{
+        note_id: number
+        first_field: string | null
+        score: number
+        cos?: number
+        bm25?: number
+        matched?: number
+      }>>
       classifyBadges(noteIds: number[], queryText: string): Promise<Array<{ note_id: number; category?: 'in' | 'out' | 'related' | 'unknown'; category_num?: 0 | 1 | 2 | 3 }>>
       semanticRerankSmall(query: string): Promise<Array<{ note_id: number; first_field: string | null; rerank?: number }>>
       unsuspendNotes(noteIds: number[]): Promise<{ ok: boolean; changed: number; error?: string }>
@@ -48,6 +56,9 @@ declare global {
         rate: number
         etaSeconds: number
       }
+      migrateEmbeddingsTo4096(): { ok: boolean; changed: number }
+      buildVectorIndexHNSW(): Promise<{ ok: boolean; path?: string; error?: string }>
+      getHnswBuildStatus(): { running: boolean; total: number; processed: number; errors: number; startedAt?: number; etaSeconds?: number }
       embedSearch(query: string, topK?: number): Promise<Array<{ note_id: number; first_field: string | null; rerank: number }>>
       getRelatedByEmbedding(noteId: number, minCos?: number, topK?: number): Promise<Array<{ note_id: number; first_field: string | null; cos: number }>>
       extractFrontKeyIdeas(noteId: number, maxItems?: number): string[]
@@ -66,6 +77,7 @@ declare global {
       cosineForTerms(terms: string[], query: string): Promise<Array<{ term: string; cos: number }>>
       embedCosForTermAgainstNotes(term: string, noteIds: number[]): Promise<Array<{ note_id: number; cos: number }>>
       embedCosForTermsComboAgainstNotes(terms: string[], noteIds: number[]): Promise<Array<{ note_id: number; cos: number }>>
+      groupNotesByAI(noteIds: number[], queryText: string): Promise<Array<{ label: string; notes: number[] }>>
       getNoteDetails(noteId: number): {
         note: { note_id: number; model_name: string; mod: number | null }
         fields: Array<{ field_name: string; value_html: string; ord: number | null }>
@@ -73,6 +85,7 @@ declare global {
       } | null
       runIngest(query?: string): Promise<{ code: number; output: string }>
       pingAnkiConnect(): Promise<{ ok: boolean; version?: number; error?: string }>
+      openInAnki(noteId: number): Promise<{ ok: boolean; error?: string }>
     }
   }
 }

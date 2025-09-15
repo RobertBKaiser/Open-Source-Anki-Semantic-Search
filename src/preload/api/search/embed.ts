@@ -77,6 +77,7 @@ export async function getRelatedByEmbedding(noteId: number, minCos: number = 0.7
 
 // Embedding-based search over query text with optional HNSW acceleration
 export async function embedSearch(query: string, topK = 200): Promise<Array<{ note_id: number; first_field: string | null; rerank: number }>> {
+  const backend = getSetting('embedding_backend') || 'deepinfra'
   const key = getSetting('deepinfra_api_key') || process.env.DEEPINFRA_API_KEY || ''
   const raw = String(query || '').trim()
   if (!raw) return []
@@ -140,8 +141,38 @@ export async function embedSearch(query: string, topK = 200): Promise<Array<{ no
     } catch { return [] }
   }
 
-  // If no API key, immediately use offline fallback
-  if (!key) return offlineFallback()
+  // If backend is gemma or no DeepInfra key, compute local embedding for the query
+  if (backend === 'gemma' || !key) {
+    try {
+      const qClean = stripHtmlToText(raw).slice(0, 1000)
+      const arr = await (globalThis as any).api?.computeLocalEmbedding?.([qClean], 'query')
+      const vec = Array.isArray(arr) && Array.isArray(arr[0]) ? new Float32Array(arr[0]) : null
+      if (!vec || vec.length === 0) return []
+      // Full scan: match on dimension equality
+      const dbEmb = getEmbDb()
+      const firstFieldStmt = getDb().prepare('SELECT value_html FROM note_fields WHERE note_id = ? ORDER BY ord ASC LIMIT 1')
+      let qn = 0; for (let i = 0; i < vec.length; i++) qn += vec[i] * vec[i]
+      qn = Math.sqrt(qn) || 1
+      const rows = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings WHERE dim = ?').all(vec.length) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+      const scores: Array<{ id: number; s: number }> = []
+      for (const r of rows) {
+        if (!r.vec) continue
+        const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
+        if (v.length !== vec.length) continue
+        let dot = 0
+        for (let i = 0; i < vec.length; i++) dot += vec[i] * v[i]
+        const cos = dot / (qn * (r.norm || 1))
+        scores.push({ id: r.note_id, s: cos })
+      }
+      scores.sort((a, b) => b.s - a.s)
+      const picked = scores.slice(0, Math.max(1, Math.min(100, topK)))
+      const mapped = picked.map(({ id, s }) => {
+        const row = firstFieldStmt.get(id) as { value_html?: string } | undefined
+        return { note_id: id, first_field: row?.value_html ?? null, rerank: s }
+      }).filter((r) => frontIsVisible(r.first_field))
+      return mapped
+    } catch { return offlineFallback() }
+  }
 
   // Online embed: ALWAYS embed the cleaned, capped query as a single input
   const qClean = stripHtmlToText(raw).slice(0, 1000)
@@ -194,8 +225,56 @@ export async function embedSearch(query: string, topK = 200): Promise<Array<{ no
 // Embedding-based related by selected concept terms with FTS prefilter and RRF
 export async function getRelatedByEmbeddingTerms(terms: string[], topK: number = 20): Promise<Array<{ note_id: number; first_field: string | null; cos: number }>> {
   try {
+    const backend = getSetting('embedding_backend') || 'deepinfra'
     const key = getSetting('deepinfra_api_key') || process.env.DEEPINFRA_API_KEY || ''
-    if (!key) return []
+    if (backend === 'gemma' || !key) {
+      // Local path: embed each term and aggregate
+      const termsClean = Array.isArray(terms) ? terms.map((t) => String(t || '').trim()).filter((t) => t.length > 0) : []
+      if (termsClean.length === 0) return []
+      const embs = await (globalThis as any).api?.computeLocalEmbedding?.(termsClean, 'query')
+      if (!Array.isArray(embs) || embs.length === 0) return []
+      // BM25+cos aggregation (same as remote path)
+      const bm = searchByBm25Terms(termsClean, Math.min(1000, Math.max(200, topK * 20)))
+      const candidates = bm.map((r) => r.note_id)
+      const dbEmb = getEmbDb()
+      const perNoteBest = new Map<number, number>()
+      for (const e of embs) {
+        const q = new Float32Array(e)
+        let qn = 0; for (let i = 0; i < q.length; i++) qn += q[i] * q[i]
+        qn = Math.sqrt(qn) || 1
+        const rows: Array<{ note_id: number; dim: number; vec: Buffer; norm: number }> = []
+        if (candidates.length > 0) {
+          const CHUNK = 900
+          for (let i = 0; i < candidates.length; i += CHUNK) {
+            const ids = candidates.slice(i, i + CHUNK)
+            const placeholders = ids.map(() => '?').join(',')
+            const part = dbEmb.prepare(`SELECT note_id, dim, vec, norm FROM embeddings WHERE note_id IN (${placeholders}) AND dim = ?`).all(...ids, q.length) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+            rows.push(...part)
+          }
+        } else {
+          const iter = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings WHERE dim = ?').iterate(q.length) as any
+          for (const r of iter) rows.push(r)
+        }
+        for (const r of rows) {
+          if (!r.vec) continue
+          const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
+          if (v.length !== q.length) continue
+          let dot = 0
+          for (let i = 0; i < q.length; i++) dot += q[i] * v[i]
+          const cos = dot / (qn * (r.norm || 1))
+          perNoteBest.set(r.note_id, Math.max(perNoteBest.get(r.note_id) || -Infinity, cos))
+        }
+      }
+      const firstBy = new Map<number, string | null>()
+      const stmt = getDb().prepare('SELECT value_html FROM note_fields WHERE note_id = ? ORDER BY ord ASC LIMIT 1')
+      const out: Array<{ note_id: number; first_field: string | null; cos: number }> = []
+      for (const [id, cos] of perNoteBest.entries()) {
+        const row = stmt.get(id) as { value_html?: string } | undefined
+        out.push({ note_id: id, first_field: row?.value_html ?? null, cos })
+      }
+      out.sort((a, b) => b.cos - a.cos)
+      return out.slice(0, topK)
+    }
     const model = getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'
     const dims = Number(getSetting('deepinfra_embed_dims') || '4096')
     const termsClean = Array.isArray(terms) ? terms.map((t) => String(t || '').trim()).filter((t) => t.length > 0) : []

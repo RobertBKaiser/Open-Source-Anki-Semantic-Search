@@ -62,13 +62,43 @@ export function getEmbeddingProgress(): {
   etaSeconds: number
 } {
   const dbEmb = getEmbDb()
+  const backend = (getDb().prepare("SELECT value FROM app_settings WHERE key='embedding_backend'").get() as { value?: string } | undefined)?.value || 'deepinfra'
   const total = (getDb().prepare('SELECT COUNT(1) AS c FROM notes').get() as { c: number }).c || 0
-  const embedded = (dbEmb.prepare('SELECT COUNT(1) AS c FROM embeddings').get() as { c: number }).c || 0
-  const pending = (dbEmb.prepare("SELECT COUNT(1) AS c FROM embed_jobs WHERE status='pending'").get() as { c: number }).c || 0
-  const errors = (dbEmb.prepare("SELECT COUNT(1) AS c FROM embed_jobs WHERE status='error'").get() as { c: number }).c || 0
+  let embedded = 0
+  try {
+    if (backend === 'gemma') {
+      const modelIdRow = getDb().prepare("SELECT value FROM app_settings WHERE key='gemma_model_id'").get() as { value?: string } | undefined
+      const dtypeRow = getDb().prepare("SELECT value FROM app_settings WHERE key='gemma_dtype'").get() as { value?: string } | undefined
+      const modelId = (modelIdRow?.value || 'onnx-community/embeddinggemma-300m-ONNX')
+      const dtype = (dtypeRow?.value || 'q4')
+      const crypto = require('node:crypto')
+      const marker = `gemma|${modelId}|${dtype}|`
+      const iter = dbEmb.prepare('SELECT note_id, hash FROM embeddings').iterate() as any
+      for (const r of iter) { if (typeof r?.hash === 'string' && r.hash.startsWith(marker)) embedded++ }
+    } else {
+      embedded = (dbEmb.prepare('SELECT COUNT(1) AS c FROM embeddings').get() as { c: number }).c || 0
+    }
+  } catch {}
+  let pending = 0
+  let errors = 0
+  try {
+    if (backend === 'gemma') {
+      const modelIdRow = getDb().prepare("SELECT value FROM app_settings WHERE key='gemma_model_id'").get() as { value?: string } | undefined
+      const dtypeRow = getDb().prepare("SELECT value FROM app_settings WHERE key='gemma_dtype'").get() as { value?: string } | undefined
+      const modelId = (modelIdRow?.value || 'onnx-community/embeddinggemma-300m-ONNX')
+      const dtype = (dtypeRow?.value || 'q4')
+      const marker = `gemma|${modelId}|${dtype}|`
+      pending = (dbEmb.prepare("SELECT COUNT(1) AS c FROM embed_jobs WHERE status='pending' AND hash LIKE ?").get(`${marker}%`) as { c: number }).c || 0
+      errors = (dbEmb.prepare("SELECT COUNT(1) AS c FROM embed_jobs WHERE status='error' AND hash LIKE ?").get(`${marker}%`) as { c: number }).c || 0
+    } else {
+      pending = (dbEmb.prepare("SELECT COUNT(1) AS c FROM embed_jobs WHERE status='pending'").get() as { c: number }).c || 0
+      errors = (dbEmb.prepare("SELECT COUNT(1) AS c FROM embed_jobs WHERE status='error'").get() as { c: number }).c || 0
+    }
+  } catch {}
   let rate = 0
   try {
-    const row = dbEmb.prepare("SELECT value FROM settings WHERE key='embed_progress'").get() as { value?: string }
+    const key = backend === 'gemma' ? 'embed_progress_gemma' : 'embed_progress'
+    const row = dbEmb.prepare("SELECT value FROM settings WHERE key=?").get(key) as { value?: string }
     if (row?.value) { const obj = JSON.parse(row.value); rate = Number(obj?.rate || 0) }
   } catch {}
   const remaining = Math.max(0, total - embedded)

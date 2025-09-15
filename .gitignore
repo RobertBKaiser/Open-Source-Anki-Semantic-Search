@@ -31,3 +31,4 @@ database/embeddings.db-shm
 database/embeddings.db-wal
 database/hnsw_index.bin
 database/embeddings.db-wal
+database/embeddings.db-wal

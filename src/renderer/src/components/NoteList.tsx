@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from '
 import { FixedSizeList as VList, type ListChildComponentProps } from 'react-window'
 import { ChevronRight, ChevronDown } from 'lucide-react'
 import { NoteCard, type NoteCardMode, type NoteListItem } from '@/components/note/NoteCard'
+import { NoteGroup } from '@/components/tags/NoteGroup'
+import type { TagGroup as TagGroupType } from '@/components/tags/NoteGroup'
+import type { TagGroup } from '@/components/tags/NoteGroup'
 // Memoized wrapper to prevent non-selected rows from re-rendering on selection changes
 const MemoNoteCard = memo(NoteCard, (prev, next) => {
   // Re-render only if the specific note row selection or mode or note reference changes
@@ -68,11 +71,12 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
   
   // Tag navigation state - must be at top level to follow Rules of Hooks
   // This prevents React error #310 (conditional hook calls)
-  const [tagGroups, setTagGroups] = useState<TagGroup[]>([])
+  const [tagGroups, setTagGroups] = useState<TagGroupType[]>([])
   // AI groups computed from current visible notes
-  const [aiGroups, setAiGroups] = useState<TagGroup[]>([])
+  const [aiGroups, setAiGroups] = useState<TagGroupType[]>([])
   // Expanded state for virtualized grouped views
-  const [expandedAiKeys, setExpandedAiKeys] = useState<Set<string>>(new Set())
+  // Deprecated per new AI grouping UI (reuse Tag NoteGroup UI)
+  // const [expandedAiKeys, setExpandedAiKeys] = useState<Set<string>>(new Set())
   const [expandedTagKeys, setExpandedTagKeys] = useState<Set<string>>(new Set())
   
   // Calculate total notes for AI groups using unique note IDs (avoid double-counting across groups)
@@ -124,10 +128,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
     return { rows: out, keys }
   }, [computeGroupUniqueCount])
 
-  const aiRowsMemo = useMemo(() => {
-    if (!aiGrouping || aiGroups.length === 0) return { rows: [] as GroupRow[], keys: [] as string[] }
-    return flattenGroups(aiGroups, expandedAiKeys)
-  }, [aiGrouping, aiGroups, expandedAiKeys, flattenGroups])
+  // AI rows virtualized view removed; AI grouping now reuses Tag NoteGroup UI
 
   const tagRowsMemo = useMemo(() => {
     if (!currentTagPrefix || tagGroups.length === 0) return { rows: [] as GroupRow[], keys: [] as string[] }
@@ -216,16 +217,54 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
         const ids = subset.map((n) => n.note_id)
         if (!ids.length) { if (alive) setAiGroups([]); return }
         const res = await (window as any).api?.groupNotesByAI?.(ids, currentQuery)
-        if (!Array.isArray(res) || res.length === 0) { if (alive) setAiGroups([]); return }
+        const groupsIn: any[] = Array.isArray(res) ? res : (Array.isArray((res as any)?.groups) ? (res as any).groups : [])
+        const hierarchyIn: Array<{ label: string; children: string[] }> = Array.isArray((res as any)?.hierarchy) ? (res as any).hierarchy : []
+        if (!Array.isArray(groupsIn) || groupsIn.length === 0) { if (alive) setAiGroups([]); return }
         const byId = new Map<number, any>(subset.map((n: any) => [n.note_id, n]))
-        const mapped = res.map((g: any) => {
-          const idsG = Array.isArray(g?.notes) ? g.notes.map((x: any) => Number(x)).filter((x: number) => byId.has(x)) : []
-          idsG.sort((a: number, b: number) => a - b)
-          const items = idsG.map((id: number) => byId.get(id))
-          return { keyword: String(g.label || ''), notes: items } as TagGroup
-        })
-        mapped.sort((a: any, b: any) => String(a.keyword).localeCompare(String(b.keyword)))
-        if (alive) setAiGroups(mapped)
+        // Build hierarchy nodes first
+        const nodeMap = new Map<string, TagGroupType>()
+        const getNode = (label: string): TagGroupType => {
+          const key = String(label || '')
+          if (!nodeMap.has(key)) nodeMap.set(key, { keyword: key, notes: [], groups: [] })
+          return nodeMap.get(key) as TagGroupType
+        }
+        const childSet = new Set<string>()
+        for (const h of hierarchyIn) {
+          const parent = getNode(h.label)
+          const children = Array.isArray(h.children) ? h.children : []
+          for (const c of children) {
+            const child = getNode(String(c))
+            parent.groups = parent.groups || []
+            if (!parent.groups.includes(child)) parent.groups.push(child)
+            childSet.add(child.keyword)
+          }
+        }
+        // Assign notes to their labeled nodes, de-duplicating across labels
+        const assigned = new Set<number>()
+        for (const g of groupsIn as any[]) {
+          const label = String(g?.label || '')
+          const node = getNode(label)
+          const rawIds = Array.isArray(g?.notes) ? g.notes.map((x: any) => Number(x)) : []
+          const filteredIds = rawIds.filter((id: number) => byId.has(id) && !assigned.has(id))
+          filteredIds.sort((a: number, b: number) => a - b)
+          filteredIds.forEach((id: number) => assigned.add(id))
+          if (filteredIds.length > 0) {
+            node.notes = (node.notes || []).concat(filteredIds.map((id: number) => byId.get(id)))
+          }
+        }
+        // Leftovers go into an 'Other' root group
+        const leftover = ids.filter((id) => byId.has(id) && !assigned.has(id))
+        if (leftover.length > 0) {
+          const other = getNode('Other')
+          other.notes = (other.notes || []).concat(leftover.map((id) => byId.get(id)))
+        }
+        // Determine roots
+        const labels = Array.from(nodeMap.keys())
+        const rootLabels = hierarchyIn.length > 0 ? labels.filter((l) => !childSet.has(l)) : labels
+        const roots = rootLabels.map((l) => nodeMap.get(l) as TagGroupType)
+        // Sort roots alphabetically by label for consistency
+        roots.sort((a: any, b: any) => String(a.keyword).localeCompare(String(b.keyword)))
+        if (alive) setAiGroups(roots)
       } catch {
         if (alive) setAiGroups([])
       }
@@ -320,189 +359,9 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
       }
     } catch {}
   }, [notes, onSelect])
-  function formatJaccardPercent(j?: number): { label: string; cls: string } | null {
-    if (typeof j !== 'number' || Number.isNaN(j)) return null
-    const pct = Math.max(0, Math.min(100, Math.round(j * 100)))
-    const label = `${pct}%`
-    const cls = pct >= 66
-      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-      : pct >= 33
-        ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-        : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
-    return { label, cls }
-  }
-
-  function ScoreBadges(n: any): React.ReactNode {
-    const jacMeta = formatJaccardPercent(n.jaccard)
-    // Numeric badge chip (0..3)
-    if (typeof (n as any).badge_num === 'number') {
-      const bn = Number((n as any).badge_num)
-      const label = bn === 0 ? 'Hit' : bn === 1 ? 'Very Related' : bn === 2 ? 'Somewhat Related' : 'Not Related'
-      const cls = bn === 0
-        ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-        : bn === 1
-          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-          : bn === 2
-            ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-            : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
-      return (
-        <div className="flex items-center gap-1 ml-2">
-          <span className={`text-[11px] rounded-md px-1.5 py-0.5 ${cls}`} title="LLM badge (0 best, 3 worst)">
-            {label}
-          </span>
-        </div>
-      )
-    }
-    if (mode === 'semantic') {
-      return (
-        <div className="flex items-center gap-1 ml-2">
-          {typeof n.rerank !== 'undefined' && (
-            <span
-              className="text-[11px] rounded-md px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
-              title="Embedding cosine similarity"
-            >
-              Cos: {Number(n.rerank).toFixed(3)}
-            </span>
-          )}
-        </div>
-      )
-    }
-    if (mode === 'rerank') {
-      return (
-        <div className="flex items-center gap-1 ml-2">
-          {typeof n.rerank !== 'undefined' && (
-            <span
-              className="text-[11px] rounded-md px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
-              title="Semantic reranker relevance score"
-            >
-              Rerank: {Number(n.rerank).toFixed(3)}
-            </span>
-          )}
-        </div>
-      )
-    }
-    if (mode === 'hybrid') {
-      return (
-        <div className="flex items-center gap-1 ml-2">
-          {typeof (n as any).score === 'number' && (() => {
-            const s = Number((n as any).score)
-            const pct = Math.max(0, Math.min(100, s * 100))
-            const cos = typeof (n as any).cos === 'number' ? Number((n as any).cos) : NaN
-            const bm = typeof (n as any).bm25 === 'number' ? Number((n as any).bm25) : (typeof (n as any).bm25 === 'undefined' && typeof (n as any).bm25 !== 'number' && typeof (n as any).bm25 !== 'undefined' ? Number.NaN : Number((n as any).bm25))
-            const tt = `Cosine: ${Number.isFinite(cos) ? cos.toFixed(3) : '—'} • BM25: ${Number.isFinite(bm) ? bm.toFixed(2) : '—'}`
-            return (
-              <span
-                className="text-[11px] rounded-md px-1.5 py-0.5 bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300"
-                title={tt}
-              >
-                Similarity: {pct.toFixed(1)}%
-              </span>
-            )
-          })()}
-        </div>
-      )
-    }
-    return (
-      <div className="flex items-center gap-1 ml-2">
-        {typeof n.bm25 !== 'undefined' && (
-          <span
-            className="text-[11px] rounded-md px-1.5 py-0.5 bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-            title="FTS5 bm25 (lower is better)"
-          >
-            BM25: {Number(n.bm25).toFixed(2)}
-          </span>
-        )}
-        {typeof n.trigrams !== 'undefined' && (
-          <span
-            className="text-[11px] rounded-md px-1.5 py-0.5 bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-            title="Trigram hits (higher is better)"
-          >
-            Tri: {Number(n.trigrams).toFixed(0)}
-          </span>
-        )}
-        {jacMeta && (
-          <span
-            className={`text-[11px] rounded-md px-1.5 py-0.5 ${jacMeta.cls}`}
-            title="Trigram Jaccard similarity (|A∩B| / |A∪B|)"
-          >
-            Jacc: {jacMeta.label}
-          </span>
-        )}
-        {typeof n.rrf !== 'undefined' && (
-          <span
-            className="text-[11px] rounded-md px-1.5 py-0.5 bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-            title="Reciprocal Rank Fusion score"
-          >
-            RRF: {Number(n.rrf).toFixed(3)}
-          </span>
-        )}
-        {n.where && (
-          <span
-            className="text-[11px] rounded-md px-1.5 py-0.5 bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
-            title="Where the match was found"
-          >
-            {n.where}
-          </span>
-        )}
-      </div>
-    )
-  }
-
-  function PreviewText({ value }: { value: string | null }) {
-    const src = String(value || '')
-    // 1) Abbreviate media and normalize <br>
-    let html0 = src
-      .replace(/<img[^>]*>/gi, '🖼️')
-      .replace(/\[sound:[^\]]+\]/gi, ' 🔊 ')
-      .replace(/<br\s*\/?\s*>/gi, ' ')
-    // 2) Whitelist basic inline formatting tags; strip all others except allowed and their closing tags
-    html0 = html0.replace(/<(?!\/?(?:b|strong|i|em|u|sub|sup|mark|code)\b)[^>]*>/gi, '')
-    // 3) Cloze coloring: turn {{cN::inner::...}} into colored span (preserving inner allowed tags)
-    const colors = ['#9b5de5', '#3a86ff', '#00c853', '#ff8f00', '#00e5ff', '#ff006e']
-    html0 = html0.replace(/\{\{c(\d+)::([\s\S]*?)(?:::[^}]*)?\}\}/gi, (_m, n, inner) => {
-      const idx = (Number(n) - 1) % colors.length
-      const color = colors[idx < 0 ? 0 : idx]
-      return `<span style="color:${color};font-weight:600">${inner}</span>`
-    })
-    // 4) Decode basic entities and collapse spaces
-    let safeHtml = html0
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&amp;/g, '&')
-      .replace(/\s+/g, ' ')
-      .trim()
-    
-    // 4.5) Filter out problematic Unicode characters that cause KaTeX issues
-    // Remove characters that KaTeX doesn't recognize (like ⌬ U+9004)
-    safeHtml = safeHtml.replace(/[\u9000-\u9004]/g, '?').replace(/\u232C|⌬/g, '?')
-    // 5) KaTeX render on a detached element to avoid flicker (only if math-like delimiters exist)
-    const withMath = useMemo(() => {
-      const hasMath = /\$\$|\\\[|\\\(|(^|[^\\])\$/m.test(src)
-      if (!hasMath) return safeHtml
-      const tmp = document.createElement('span')
-      tmp.innerHTML = safeHtml
-      try {
-        renderMathInElement(tmp, {
-          delimiters: [
-            { left: '$$', right: '$$', display: true },
-            { left: '\\[', right: '\\]', display: true },
-            { left: '\\(', right: '\\)', display: false },
-            { left: '$', right: '$', display: false },
-          ],
-          throwOnError: false,
-          trust: true,
-          strict: false, // Allow non-strict mode to handle unknown characters
-        })
-      } catch (e) {
-        try { console.warn('KaTeX rendering failed:', e) } catch {}
-      }
-      return tmp.innerHTML
-    }, [safeHtml, src])
-    return <span className="text-sm flex-1 truncate" dangerouslySetInnerHTML={{ __html: withMath }} />
-  }
-
-  const PreviewTextMemo = React.memo(PreviewText, (prev, next) => prev.value === next.value)
+  // Duplicated row UI helpers removed: unified via MemoNoteCard
+ 
+  // (PreviewText/ScoreBadges/formatJaccardPercent) were duplicated here; now provided by NoteCard
 
   const Row = useCallback(({ index, style, data }: ListChildComponentProps<any>) => {
     const n: NoteListItem = data.notes[index]
@@ -522,56 +381,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
     )
   }, [mode, onSelect, onToggleSelect, selectedIds])
 
-  const renderRowInline = (n: NoteListItem) => (
-    <button
-      key={n.note_id}
-      onClick={() => onSelect(n.note_id)}
-      className={`relative w-full text-left px-3 py-1 truncate ${selectedId === n.note_id ? 'bg-sidebar-accent' : ''}`}
-    >
-      {(typeof (n as any).badge_num === 'number' || n.rerank_category) && (
-        <span
-          className="absolute left-0 top-0 bottom-0 w-[6px] rounded-r-sm"
-          style={{
-            backgroundColor: (() => {
-              const num = (n as any).badge_num
-              if (typeof num === 'number') {
-                return num === 0 ? '#10b981' : num === 1 ? '#3b82f6' : num === 2 ? '#f59e0b' : '#9ca3af'
-              }
-              return n.rerank_category === 'in' ? '#ff3b30' : n.rerank_category === 'out' ? '#000000' : n.rerank_category === 'related' ? '#3b82f6' : 'transparent'
-            })()
-          }}
-        />
-      )}
-      <div className="flex items-center gap-2">
-        {mode === 'select' && (
-          <input
-            type="checkbox"
-            data-note-select
-            value={n.note_id}
-            className="shrink-0"
-            checked={selectedIds.includes(n.note_id)}
-            onChange={(e) => {
-              e.stopPropagation()
-              onToggleSelect && onToggleSelect(n.note_id, (e.target as HTMLInputElement).checked)
-            }}
-            onClick={(e) => e.stopPropagation()}
-            onPointerDownCapture={(e) => e.stopPropagation()}
-          />
-        )}
-        <PreviewTextMemo value={n.first_field} />
-        {Array.isArray((n as any).__overlaps) && (n as any).__overlaps.length > 0 && (
-          <div className="ml-auto flex items-center gap-1">
-            {(n as any).__overlaps.map((o: any, idx: number) => (
-              <span key={idx} className="text-[10px] rounded-md px-1 py-[1px] bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300" title={`Also matches ${o.keyword}`}>
-                {o.keyword} {(o.cos * 100).toFixed(1)}%
-              </span>
-            ))}
-          </div>
-        )}
-        {ScoreBadges(n)}
-      </div>
-    </button>
-  )
+  // Note: inline row rendering is handled directly via MemoNoteCard where needed
 
   // Component to render hierarchical tag groups with improved UI/UX and accessibility
   // - Full-width design extending to the right edge of the note list
@@ -832,7 +642,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
     )
   }
 
-  // AI grouping view
+  // AI grouping view (reuse Tag NoteGroup UI). No layout from AI code; only labels and note sets.
   if (aiGrouping && aiGroups.length > 0) {
     return (
       <div ref={containerRef} className="min-h-0 h-full overflow-y-auto">
@@ -842,69 +652,38 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
             <span className="text-xs text-muted-foreground">({aiGroups.length} groups, {totalNotesAi} notes)</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <button className="text-xs px-3 py-1 rounded-md border bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30 transition-colors" onClick={() => setExpandedAiKeys(new Set(aiRowsMemo.keys))}>
+            <button
+              className="text-xs px-3 py-1 rounded-md border bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30 transition-colors"
+              onClick={() => { setDefaultExpanded(true); setExpandVersion((v) => v + 1) }}
+            >
               <ChevronDown className="w-3 h-3 inline mr-1" />
               Expand All
             </button>
-            <button className="text-xs px-3 py-1 rounded-md border bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors" onClick={() => setExpandedAiKeys(new Set())}>
+            <button
+              className="text-xs px-3 py-1 rounded-md border bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors"
+              onClick={() => { setDefaultExpanded(false); setExpandVersion((v) => v + 1) }}
+            >
               <ChevronRight className="w-3 h-3 inline mr-1" />
               Collapse All
             </button>
           </div>
         </div>
-        <VList
-          height={height}
-          width={'100%'}
-          itemCount={aiRowsMemo.rows.length}
-          itemSize={ITEM_SIZE}
-          itemKey={(index) => {
-            const r = aiRowsMemo.rows[index] as any
-            return r.type === 'header' ? `h:${r.key}` : `n:${r.note.note_id}`
-          }}
-        >
-          {({ index, style }) => {
-            const row = aiRowsMemo.rows[index] as any
-            if (row.type === 'header') {
-              const isOpen = expandedAiKeys.has(row.key)
-              return (
-                <div style={style} className="px-3 py-1 bg-gradient-to-r from-blue-600 to-blue-700 text-white" onClick={() => {
-                  const next = new Set(expandedAiKeys)
-                  if (isOpen) next.delete(row.key); else next.add(row.key)
-                  setExpandedAiKeys(next)
-                }}>
-                  <div className="flex items-center justify-between" style={{ marginLeft: `${row.depth * 12}px` }}>
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="inline-flex items-center justify-center w-4 h-4 rounded bg-white/10 flex-shrink-0">{isOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}</span>
-                      <span className="truncate text-xs font-medium" title={row.label}>{row.label}</span>
-                      {typeof row.kcos === 'number' && row.kcos >= 0 && (
-                        <span className="text-[10px] rounded bg-white/20 px-1 py-[1px] flex-shrink-0">{(row.kcos * 100).toFixed(1)}%</span>
-                      )}
-                      {typeof row.gbm25 === 'number' && (
-                        <span className="text-[10px] rounded bg-white/20 px-1 py-[1px] flex-shrink-0">BM25 {row.gbm25.toFixed(2)}</span>
-                      )}
-                    </div>
-                    <span className="text-xs font-semibold bg-white/20 rounded-full px-2 py-0.5 flex-shrink-0 ml-2">{row.count}</span>
-                  </div>
-                </div>
-              )
-            }
-            const note = row.note as NoteListItem
-            return (
-              <div style={style} className="border-b">
-                <MemoNoteCard
-                  n={note}
-                  mode={mode}
-                  selected={selectedId === note.note_id}
-                  selectedIds={selectedIds}
-                  onToggleSelect={onToggleSelect}
-                  onSelect={onSelect}
-                  ioRoot={containerRef.current}
-                  variant="line"
-                />
-              </div>
-            )
-          }}
-        </VList>
+        <div className="px-2 py-2">
+          {aiGroups.map((g, idx) => (
+            <NoteGroup
+              key={`${g.keyword}-${idx}`}
+              group={g as any}
+              depth={0}
+              expandVersion={expandVersion}
+              defaultExpanded={defaultExpanded}
+              mode={mode as any}
+              selectedId={selectedId}
+              selectedIds={selectedIds}
+              onToggleSelect={onToggleSelect}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
       </div>
     )
   }

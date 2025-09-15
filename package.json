@@ -8,7 +8,7 @@
   "license": "MIT",
   "scripts": {
     "format": "prettier --write .",
-    "lint": "eslint --cache .",
+    "lint": "eslint --cache \"src/**/*.{ts,tsx}\"",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
@@ -22,6 +22,8 @@
     "build:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.0.0",
+    "onnxruntime-node": "^1.18.0",
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
     "@hookform/resolvers": "^5.2.1",

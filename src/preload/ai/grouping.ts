@@ -1,15 +1,18 @@
 import { getDb } from '../db/core'
 import { getSetting } from '../db/settings'
 
-export async function groupNotesByAI(noteIds: number[], queryText: string): Promise<Array<{ label: string; notes: number[] }>> {
+export async function groupNotesByAI(noteIds: number[], queryText: string): Promise<{
+  groups: Array<{ label: string; notes: number[] }>
+  hierarchy?: Array<{ label: string; children: string[] }>
+}> {
   try {
     const allIds = Array.isArray(noteIds) ? noteIds.filter((n) => Number.isFinite(Number(n))) : []
     const MAX = 60
     const ids = allIds.slice(0, MAX)
-    if (ids.length === 0) return []
+    if (ids.length === 0) return { groups: [] }
     const apiKey = getSetting('openai_api_key') || process.env.OPENAI_API_KEY || ''
     const promptId = 'pmpt_68b5ad09507c8195999c456bd50afd3809e0e005559ce008'
-    if (!apiKey || !promptId) return []
+    if (!apiKey || !promptId) return { groups: [] }
 
     const frontStmt = getDb().prepare('SELECT value_html FROM note_fields WHERE note_id = ? ORDER BY ord ASC LIMIT 1')
     const strip = (html: string): string => String(html || '')
@@ -40,7 +43,7 @@ export async function groupNotesByAI(noteIds: number[], queryText: string): Prom
 
     const url = 'https://api.openai.com/v1/responses'
     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` }, body: JSON.stringify({ prompt: { id: promptId }, input }) })
-    if (!res.ok) return []
+    if (!res.ok) return { groups: [] }
     const raw = await res.json() as any
 
     const collectText = (j: any): string => {
@@ -61,16 +64,21 @@ export async function groupNotesByAI(noteIds: number[], queryText: string): Prom
     }
     const text = collectText(raw)
     let groups: Array<{ label: string; notes: number[] }> = []
+    let hierarchy: Array<{ label: string; children: string[] }> | undefined
     try {
-      const start = text.indexOf('[')
-      const end = text.lastIndexOf(']')
-      const jsonStr = start >= 0 && end > start ? text.slice(start, end + 1) : text
-      const parsed = JSON.parse(jsonStr)
+      // Accept either array-of-groups or object with { groups, hierarchy }
+      const trimmed = text.trim()
+      const parsed = JSON.parse(trimmed)
       if (Array.isArray(parsed)) {
         groups = parsed.map((g: any) => ({ label: String(g?.label || ''), notes: Array.isArray(g?.notes) ? g.notes.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)) : [] }))
+      } else if (parsed && typeof parsed === 'object') {
+        const pg = Array.isArray((parsed as any).groups) ? (parsed as any).groups : []
+        groups = pg.map((g: any) => ({ label: String(g?.label || ''), notes: Array.isArray(g?.notes) ? g.notes.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n)) : [] }))
+        const ph = Array.isArray((parsed as any).hierarchy) ? (parsed as any).hierarchy : []
+        hierarchy = ph.map((h: any) => ({ label: String(h?.label || ''), children: Array.isArray(h?.children) ? h.children.map((s: any) => String(s)) : [] }))
       }
     } catch {}
-    if (!Array.isArray(groups) || groups.length === 0) return [{ label: 'Other', notes: ids.slice().sort((a, b) => a - b) }]
+    if (!Array.isArray(groups) || groups.length === 0) return { groups: [{ label: 'Other', notes: ids.slice().sort((a, b) => a - b) }], hierarchy }
 
     const seen = new Set<number>()
     const cleaned: Array<{ label: string; notes: number[] }> = []
@@ -83,8 +91,8 @@ export async function groupNotesByAI(noteIds: number[], queryText: string): Prom
     if (missing.length > 0) cleaned.push({ label: 'Other', notes: missing.slice().sort((a, b) => a - b) })
     const nonEmpty = cleaned.filter((g) => Array.isArray(g.notes) && g.notes.length > 0)
     nonEmpty.sort((a, b) => a.label.localeCompare(b.label))
-    return nonEmpty
-  } catch { return [] }
+    return { groups: nonEmpty, hierarchy }
+  } catch { return { groups: [] } }
 }
 
 

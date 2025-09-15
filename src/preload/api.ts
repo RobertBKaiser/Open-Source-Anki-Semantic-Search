@@ -16,7 +16,9 @@ import { hybridSemanticModulated, hybridSemanticModulatedFromNote } from './api/
 import { semanticRerank, semanticRerankSmall } from './api/search/rerank'
 import { pingAnkiConnect, openInAnki, unsuspendNotes } from './anki/connect'
 import { runIngest } from './jobs/ingest'
+import { groupNotesByAI } from './ai/grouping'
 import { startEmbedding, stopEmbedding } from './jobs/embedding'
+import { computeLocalEmbedding } from './embeddings/gemma'
 
 export const api = {
   // settings
@@ -69,6 +71,10 @@ export const api = {
   hybridSemanticModulatedFromNote,
   semanticRerank,
   semanticRerankSmall,
+  // local embeddings
+  computeLocalEmbedding,
+  // ai grouping
+  groupNotesByAI,
   // anki & jobs
   pingAnkiConnect,
   openInAnki,

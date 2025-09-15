@@ -33,6 +33,9 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
   const [embedActionMsg, setEmbedActionMsg] = useState<string>('')
   const [runningAction, setRunningAction] = useState<boolean>(false)
   const [hnswProgress, setHnswProgress] = useState<{ running: boolean; total: number; processed: number; errors: number; startedAt?: number; etaSeconds?: number } | null>(null)
+  const [backend, setBackend] = useState<string>('deepinfra')
+  const [gemmaModel, setGemmaModel] = useState<string>('onnx-community/embeddinggemma-300m-ONNX')
+  const [gemmaDtype, setGemmaDtype] = useState<string>('q4')
 
   useEffect(() => {
     if (!open) return
@@ -52,6 +55,10 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
       setInstructionIn(instrIn)
       setInstructionOut(instrOut)
       setInstructionRelated(instrRel)
+      const be = window.api.getSetting('embedding_backend') || 'deepinfra'
+      setBackend(be)
+      setGemmaModel(window.api.getSetting('gemma_model_id') || 'onnx-community/embeddinggemma-300m-ONNX')
+      setGemmaDtype(window.api.getSetting('gemma_dtype') || 'q4')
       if (activeTab === 'embeddings') {
         const p = window.api.getEmbeddingProgress()
         setEmbedProgress(p)
@@ -216,20 +223,63 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
           <TabsContent value="embeddings" className="mt-4 space-y-3 text-sm">
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-sm font-medium">Model</label>
-                <input
+                <label className="text-sm font-medium">Backend</label>
+                <select
                   className="px-3 py-2 rounded-md bg-background border w-full"
-                  value={window.api.getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'}
-                  onChange={(e) => window.api.setSetting('deepinfra_embed_model', e.target.value)}
-                />
+                  value={backend}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setBackend(v)
+                    try { window.api.setSetting('embedding_backend', v) } catch {}
+                  }}
+                >
+                  <option value="deepinfra">DeepInfra (Qwen3 API)</option>
+                  <option value="gemma">Local (EmbeddingGemma)</option>
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm font-medium">Model</label>
+                {backend === 'deepinfra' ? (
+                  <input
+                    className="px-3 py-2 rounded-md bg-background border w-full"
+                    value={window.api.getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'}
+                    onChange={(e) => window.api.setSetting('deepinfra_embed_model', e.target.value)}
+                  />
+                ) : (
+                  <input
+                    className="px-3 py-2 rounded-md bg-background border w-full"
+                    value={gemmaModel}
+                    onChange={(e) => { setGemmaModel(e.target.value); try { window.api.setSetting('gemma_model_id', e.target.value) } catch {} }}
+                    placeholder="onnx-community/embeddinggemma-300m-ONNX"
+                  />
+                )}
               </div>
               <div>
-                <label className="text-sm font-medium">Dimensions</label>
-                <input
-                  className="px-3 py-2 rounded-md bg-background border w-full"
-                  value={window.api.getSetting('deepinfra_embed_dims') || '4096'}
-                  onChange={(e) => window.api.setSetting('deepinfra_embed_dims', e.target.value)}
-                />
+                {backend === 'deepinfra' ? (
+                  <>
+                    <label className="text-sm font-medium">Dimensions</label>
+                    <input
+                      className="px-3 py-2 rounded-md bg-background border w-full"
+                      value={window.api.getSetting('deepinfra_embed_dims') || '4096'}
+                      onChange={(e) => window.api.setSetting('deepinfra_embed_dims', e.target.value)}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <label className="text-sm font-medium">Local dtype</label>
+                    <select
+                      className="px-3 py-2 rounded-md bg-background border w-full"
+                      value={gemmaDtype}
+                      onChange={(e) => { setGemmaDtype(e.target.value); try { window.api.setSetting('gemma_dtype', e.target.value) } catch {} }}
+                    >
+                      <option value="q4">q4 (fastest)</option>
+                      <option value="q8">q8</option>
+                      <option value="fp32">fp32</option>
+                    </select>
+                  </>
+                )}
               </div>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
@@ -253,43 +303,7 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
               >
                 Rebuild All
               </button>
-              <button
-                className="text-[12px] rounded-md px-2 py-1 bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-60"
-                disabled={runningAction}
-                onClick={async () => {
-                  try {
-                    setRunningAction(true)
-                    setEmbedActionMsg('Migrating vectors to 4096…')
-                    const res = window.api.migrateEmbeddingsTo4096()
-                    setEmbedActionMsg(res.ok ? `Migrated ${res.changed} vectors to 4096 dims.` : 'Migration failed.')
-                  } catch (e) {
-                    setEmbedActionMsg(`Migration failed: ${(e as Error).message}`)
-                  } finally {
-                    setRunningAction(false)
-                  }
-                }}
-              >
-                Migrate to 4096 dims
-              </button>
-              <button
-                className="text-[12px] rounded-md px-2 py-1 bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-60"
-                disabled={runningAction}
-                onClick={async () => {
-                  try {
-                    setRunningAction(true)
-                    setEmbedActionMsg('Building HNSW index…')
-                    const res = await window.api.buildVectorIndexHNSW()
-                    if (res.ok) setEmbedActionMsg(`HNSW index built at ${res.path}`)
-                    else setEmbedActionMsg(`HNSW build failed: ${res.error || 'unknown error'}`)
-                  } catch (e) {
-                    setEmbedActionMsg(`HNSW build failed: ${(e as Error).message}`)
-                  } finally {
-                    setRunningAction(false)
-                  }
-                }}
-              >
-                Build HNSW Index
-              </button>
+              {/* Removed migrate/build buttons per request */}
             </div>
             <div className="rounded border p-2 text-xs text-muted-foreground">
               {embedProgress ? (

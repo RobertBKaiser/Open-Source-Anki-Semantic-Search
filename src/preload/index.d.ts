@@ -108,7 +108,7 @@ declare global {
       groupNotesByAI(
         noteIds: number[],
         queryText: string
-      ): Promise<Array<{ label: string; notes: number[] }>>
+      ): Promise<{ groups: Array<{ label: string; notes: number[] }>; hierarchy?: Array<{ label: string; children: string[] }> }>
       getNoteDetails(noteId: number): {
         note: { note_id: number; model_name: string; mod: number | null }
         fields: Array<{ field_name: string; value_html: string; ord: number | null }>
@@ -117,6 +117,8 @@ declare global {
       runIngest(query?: string): Promise<{ code: number; output: string }>
       pingAnkiConnect(): Promise<{ ok: boolean; version?: number; error?: string }>
       openInAnki(noteId: number): Promise<{ ok: boolean; error?: string }>
+      // Local embeddings (Transformers.js EmbeddingGemma)
+      computeLocalEmbedding(texts: string[], role?: 'query' | 'document'): Promise<number[][]>
     }
   }
 }

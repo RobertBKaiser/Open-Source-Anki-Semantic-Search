@@ -21,6 +21,21 @@ export function makeEmbKey(q: string, model: string, dims: number): string {
 
 export async function getQueryEmbeddingCached(q: string): Promise<Float32Array | null> {
   try {
+    const backend = getSetting('embedding_backend') || 'deepinfra'
+    if (backend === 'gemma') {
+      // Local path: compute via Transformers.js and cache by model+dtype
+      const modelId = getSetting('gemma_model_id') || 'onnx-community/embeddinggemma-300m-ONNX'
+      const dtype = getSetting('gemma_dtype') || 'q4'
+      const key = `${encodeURIComponent(modelId)}|${encodeURIComponent(dtype)}|${encodeURIComponent(q.trim())}`
+      const now = Date.now()
+      const hit = queryEmbCache.get(key)
+      if (hit && (now - hit.ts) < QUERY_EMB_TTL_MS) return hit.vec
+      const arr = await (globalThis as any).api?.computeLocalEmbedding?.([q], 'query')
+      const vec = Array.isArray(arr) && Array.isArray(arr[0]) ? new Float32Array(arr[0]) : null
+      if (!vec) return null
+      queryEmbCache.set(key, { vec, dims: vec.length, model: `${modelId}:${dtype}`, ts: now })
+      return vec
+    }
     const apiKey = getSetting('deepinfra_api_key') || process.env.DEEPINFRA_API_KEY || ''
     if (!apiKey) return null
     const model = getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'

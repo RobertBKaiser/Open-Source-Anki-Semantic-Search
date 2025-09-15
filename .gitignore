@@ -28,3 +28,6 @@ out
 database/anki_cache.db-shm
 database/anki_cache.db-wal
 database/embeddings.db-shm
+database/embeddings.db-wal
+database/hnsw_index.bin
+database/embeddings.db-wal

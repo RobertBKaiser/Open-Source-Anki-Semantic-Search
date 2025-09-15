@@ -60,6 +60,14 @@ Security & Privacy
 Contributing
 - PRs welcome!
 
+## License
+
+This project is licensed under the Creative Commons Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0).
+
+- Free for personal and non‑commercial use and modification with attribution.
+- Commercial use is not permitted without prior written permission.
+- Full text: see `LICENSE` or https://creativecommons.org/licenses/by-nc/4.0/
+
 ## Project Setup
 
 ### Install

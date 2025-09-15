@@ -30,6 +30,9 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
   const [instructionRelated, setInstructionRelated] = useState<string>('Given a query document, rank cards by facts and ideas not explicitly stated but closely related to the document.')
   const [embedProgress, setEmbedProgress] = useState<{ total: number; embedded: number; pending: number; errors: number; rate: number; etaSeconds: number } | null>(null)
   const [activeTab, setActiveTab] = useState<string>('general')
+  const [embedActionMsg, setEmbedActionMsg] = useState<string>('')
+  const [runningAction, setRunningAction] = useState<boolean>(false)
+  const [hnswProgress, setHnswProgress] = useState<{ running: boolean; total: number; processed: number; errors: number; startedAt?: number; etaSeconds?: number } | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -64,6 +67,8 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
       try {
         const p = window.api.getEmbeddingProgress()
         setEmbedProgress(p)
+        const bb = window.api.getHnswBuildStatus?.()
+        if (bb) setHnswProgress(bb)
       } catch {
         // ignore
       }
@@ -222,12 +227,12 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
                 <label className="text-sm font-medium">Dimensions</label>
                 <input
                   className="px-3 py-2 rounded-md bg-background border w-full"
-                  value={window.api.getSetting('deepinfra_embed_dims') || '8192'}
+                  value={window.api.getSetting('deepinfra_embed_dims') || '4096'}
                   onChange={(e) => window.api.setSetting('deepinfra_embed_dims', e.target.value)}
                 />
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 className="text-[12px] rounded-md px-2 py-1 bg-blue-600 text-white hover:bg-blue-700"
                 onClick={async () => {
@@ -248,6 +253,43 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
               >
                 Rebuild All
               </button>
+              <button
+                className="text-[12px] rounded-md px-2 py-1 bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-60"
+                disabled={runningAction}
+                onClick={async () => {
+                  try {
+                    setRunningAction(true)
+                    setEmbedActionMsg('Migrating vectors to 4096…')
+                    const res = window.api.migrateEmbeddingsTo4096()
+                    setEmbedActionMsg(res.ok ? `Migrated ${res.changed} vectors to 4096 dims.` : 'Migration failed.')
+                  } catch (e) {
+                    setEmbedActionMsg(`Migration failed: ${(e as Error).message}`)
+                  } finally {
+                    setRunningAction(false)
+                  }
+                }}
+              >
+                Migrate to 4096 dims
+              </button>
+              <button
+                className="text-[12px] rounded-md px-2 py-1 bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-60"
+                disabled={runningAction}
+                onClick={async () => {
+                  try {
+                    setRunningAction(true)
+                    setEmbedActionMsg('Building HNSW index…')
+                    const res = await window.api.buildVectorIndexHNSW()
+                    if (res.ok) setEmbedActionMsg(`HNSW index built at ${res.path}`)
+                    else setEmbedActionMsg(`HNSW build failed: ${res.error || 'unknown error'}`)
+                  } catch (e) {
+                    setEmbedActionMsg(`HNSW build failed: ${(e as Error).message}`)
+                  } finally {
+                    setRunningAction(false)
+                  }
+                }}
+              >
+                Build HNSW Index
+              </button>
             </div>
             <div className="rounded border p-2 text-xs text-muted-foreground">
               {embedProgress ? (
@@ -263,6 +305,23 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
                       <div>Progress: {p.embedded}/{p.total} ({pct}%)</div>
                       <div>Pending: {p.pending} • Errors: {p.errors}</div>
                       <div>Rate: {p.rate.toFixed(2)} notes/sec • ETA: {eta}</div>
+                      {embedActionMsg && (<div className="pt-1 text-foreground">{embedActionMsg}</div>)}
+                      {hnswProgress && (
+                        (() => {
+                          const hp = hnswProgress
+                          const pct2 = hp.total ? Math.round((hp.processed / hp.total) * 100) : 0
+                          const eta2 = (hp.etaSeconds && hp.running) ? `${Math.floor(hp.etaSeconds/60)}m ${hp.etaSeconds%60}s` : '—'
+                          return (
+                            <div className="mt-2 border-t pt-2">
+                              <div className="font-medium text-foreground">HNSW Build {hp.running ? '(running)' : ''}</div>
+                              <div className="w-full h-2 bg-muted rounded overflow-hidden">
+                                <div className="h-2 bg-teal-600" style={{ width: `${pct2}%` }} />
+                              </div>
+                              <div>Processed: {hp.processed}/{hp.total} ({pct2}%) • Errors: {hp.errors} • ETA: {eta2}</div>
+                            </div>
+                          )
+                        })()
+                      )}
                     </div>
                   )
                 })()
@@ -270,6 +329,7 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
                 <div>Progress unavailable</div>
               )}
             </div>
+            {/* Precompute UI removed per request; only HNSW index remains */}
           </TabsContent>
         </Tabs>
         <div className="pt-2">
@@ -279,5 +339,3 @@ export function SettingsSheet({ open, onClose }: SettingsSheetProps): React.JSX.
     </div>
   )
 }
-
-

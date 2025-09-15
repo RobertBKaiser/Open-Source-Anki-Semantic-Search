@@ -6,8 +6,9 @@
     <!-- https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' https://api.deepinfra.com https://api.openai.com http://127.0.0.1:8765; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: blob: *; font-src 'self' data: blob:; frame-src 'self' blob: data:; child-src 'self' blob: data:; media-src 'self' data: blob: file:"
+      content="default-src 'self'; connect-src 'self' blob: data: file: https://api.deepinfra.com https://api.openai.com http://127.0.0.1:8765; worker-src 'self' blob: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: blob: *; font-src 'self' data: blob:; frame-src 'self' blob: data:; child-src 'self' blob: data:; media-src 'self' data: blob: file:"
     />
+    
   </head>
 
   <body>

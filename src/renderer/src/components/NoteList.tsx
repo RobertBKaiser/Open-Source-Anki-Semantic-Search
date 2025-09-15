@@ -1,34 +1,27 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import renderMathInElement from 'katex/contrib/auto-render/auto-render'
-import 'katex/dist/katex.min.css'
+import React, { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react'
 import { FixedSizeList as VList, type ListChildComponentProps } from 'react-window'
+import { ChevronRight, ChevronDown } from 'lucide-react'
+import { NoteCard, type NoteCardMode, type NoteListItem } from '@/components/note/NoteCard'
+// Memoized wrapper to prevent non-selected rows from re-rendering on selection changes
+const MemoNoteCard = memo(NoteCard, (prev, next) => {
+  // Re-render only if the specific note row selection or mode or note reference changes
+  return prev.n === next.n && prev.selected === next.selected && prev.mode === next.mode
+})
 
-type NoteListItem = {
-  note_id: number
-  first_field: string | null
-  bm25?: number
-  trigrams?: number
-  combined?: number
-  cos?: number
-  rrf?: number
-  jaccard?: number
-  where?: 'front' | 'back' | 'both'
-  rerank?: number
-  rerank_in?: number
-  rerank_out?: number
-  rerank_related?: number
-  rerank_category?: 'in' | 'out' | 'related'
-}
+// Types moved to dedicated components: NoteCard (NoteListItem) and NoteGroup (TagGroup)
 
 type NoteListProps = {
   notes: NoteListItem[]
   selectedId: number | null
   onSelect: (noteId: number) => void
   onEndReached?: () => void
-  mode?: 'default' | 'exact' | 'fuzzy' | 'rerank' | 'semantic' | 'hybrid'
+  mode?: NoteCardMode
   selectedIds?: number[]
   onToggleSelect?: (noteId: number, selected: boolean) => void
-  groups?: Array<{ keyword: string; notes: NoteListItem[]; kcos?: number; gbm25?: number }>
+  aiGrouping?: boolean
+  currentQuery?: string
+  currentTagPrefix?: string
+  onTagPrefixChange?: (prefix: string) => void
 }
 
 // (removed) decode/strip helpers; handled inline in PreviewText
@@ -38,10 +31,109 @@ type NoteListProps = {
 // Render preview with cloze inner text colorized, no HTML/cloze syntax visible, media/audio abbreviated
 // (removed) previous JSX-based preview renderer
 
-export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'default', selectedIds = [], onToggleSelect, groups }: NoteListProps): React.JSX.Element {
+export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'default', selectedIds = [], onToggleSelect, aiGrouping = false, currentQuery = '', currentTagPrefix = '', onTagPrefixChange }: NoteListProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const outerRef = useRef<HTMLDivElement | null>(null)
   const [height, setHeight] = useState<number>(400)
+  // Dev memory logger (opt-in via localStorage.debug.mem = '1')
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return
+    if (localStorage.getItem('debug.mem') !== '1') return
+    type ProcessMemoryInfo = { workingSetSize: number; peakWorkingSetSize?: number; privateBytes?: number; residentSet?: number }
+    const getMemInfo = async (): Promise<ProcessMemoryInfo | null> => {
+      try {
+        const fn = (process as unknown as { getProcessMemoryInfo?: () => Promise<ProcessMemoryInfo> }).getProcessMemoryInfo
+        if (typeof fn === 'function') return await fn()
+      } catch {}
+      return null
+    }
+    const getHeap = (): { used: number; total: number } | null => {
+      try {
+        const m = (performance as unknown as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number } }).memory
+        if (m) return { used: m.usedJSHeapSize, total: m.totalJSHeapSize }
+      } catch {}
+      return null
+    }
+    ;(async () => {
+      const pi = await getMemInfo()
+      const heap = getHeap()
+      try { console.log('[mem] NoteList mount', { process: pi, heap }) } catch {}
+    })()
+  }, [])
+  
+  // Global expand/collapse controls - must be at top level to follow Rules of Hooks
+  // These hooks are used by the groups rendering but must be declared unconditionally
+  const [expandVersion, setExpandVersion] = useState<number>(0)
+  const [defaultExpanded, setDefaultExpanded] = useState<boolean>(true)
+  
+  // Tag navigation state - must be at top level to follow Rules of Hooks
+  // This prevents React error #310 (conditional hook calls)
+  const [tagGroups, setTagGroups] = useState<TagGroup[]>([])
+  // AI groups computed from current visible notes
+  const [aiGroups, setAiGroups] = useState<TagGroup[]>([])
+  // Expanded state for virtualized grouped views
+  const [expandedAiKeys, setExpandedAiKeys] = useState<Set<string>>(new Set())
+  const [expandedTagKeys, setExpandedTagKeys] = useState<Set<string>>(new Set())
+  
+  // Calculate total notes for AI groups using unique note IDs (avoid double-counting across groups)
+  const totalNotesAi = useMemo(() => {
+    if (!aiGrouping || aiGroups.length === 0) return 0
+    const ids = new Set<number>()
+    const add = (g: TagGroup): void => {
+      if (Array.isArray(g.notes)) g.notes.forEach((n: any) => ids.add(Number(n?.note_id)))
+      if (Array.isArray(g.groups)) g.groups.forEach(add)
+    }
+    aiGroups.forEach(add)
+    return ids.size
+  }, [aiGrouping, aiGroups])
+
+  // Flatten groups into a single virtualized row list
+  type GroupRowHeader = { type: 'header'; key: string; depth: number; label: string; count: number; kcos?: number; gbm25?: number }
+  type GroupRowNote = { type: 'note'; note: NoteListItem }
+  type GroupRow = GroupRowHeader | GroupRowNote
+
+  const computeGroupUniqueCount = useCallback((g: any): number => {
+    const ids = new Set<number>()
+    const add = (node: any) => {
+      if (Array.isArray(node.notes)) node.notes.forEach((n: any) => ids.add(Number(n?.note_id)))
+      if (Array.isArray(node.groups)) node.groups.forEach(add)
+    }
+    add(g)
+    return ids.size
+  }, [])
+
+  const flattenGroups = useCallback((groups: any[], expanded: Set<string>, parentKey = '', depth = 0): { rows: GroupRow[]; keys: string[] } => {
+    const out: GroupRow[] = []
+    const keys: string[] = []
+    for (const g of groups) {
+      const key = parentKey ? `${parentKey}//${g.keyword}` : String(g.keyword)
+      const count = computeGroupUniqueCount(g)
+      out.push({ type: 'header', key, depth, label: String(g.keyword || ''), count, kcos: g.kcos, gbm25: g.gbm25 })
+      keys.push(key)
+      if (expanded.has(key)) {
+        if (Array.isArray(g.notes)) {
+          for (const n of g.notes) out.push({ type: 'note', note: n })
+        }
+        if (Array.isArray(g.groups) && g.groups.length > 0) {
+          const sub = flattenGroups(g.groups, expanded, key, depth + 1)
+          out.push(...sub.rows)
+          keys.push(...sub.keys)
+        }
+      }
+    }
+    return { rows: out, keys }
+  }, [computeGroupUniqueCount])
+
+  const aiRowsMemo = useMemo(() => {
+    if (!aiGrouping || aiGroups.length === 0) return { rows: [] as GroupRow[], keys: [] as string[] }
+    return flattenGroups(aiGroups, expandedAiKeys)
+  }, [aiGrouping, aiGroups, expandedAiKeys, flattenGroups])
+
+  const tagRowsMemo = useMemo(() => {
+    if (!currentTagPrefix || tagGroups.length === 0) return { rows: [] as GroupRow[], keys: [] as string[] }
+    return flattenGroups(tagGroups, expandedTagKeys)
+  }, [currentTagPrefix, tagGroups, expandedTagKeys, flattenGroups])
+  
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -51,8 +143,162 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+  
+  // Build hierarchical tag groups when currentTagPrefix changes
+  useEffect(() => {
+    if (!currentTagPrefix || !onTagPrefixChange) {
+      setTagGroups([])
+      return
+    }
+    
+    let alive = true
+    const MAX_DEPTH = 3
+    
+    const build = async (prefix: string, depth: number): Promise<any[]> => {
+      if (depth > MAX_DEPTH) return []
+      const children = ((window as any).api?.getChildTags?.(prefix)) || []
+      if (!Array.isArray(children) || children.length === 0) {
+        const ns = ((window as any).api?.getNotesByTagPrefix?.(prefix, 500, 0)) || []
+        const label = String(prefix || '').split('::').pop() || prefix
+        return [{ keyword: label, notes: ns, count: ns.length, expanded: depth < 2 }]
+      }
+      const out: any[] = []
+      // Limit children to prevent performance issues
+      const limitedChildren = children.slice(0, 20)
+      for (const c of limitedChildren) {
+        const tail = String(c.tag || '').split('::').pop() || c.tag
+        const subs = await build(c.tag, depth + 1)
+        // If subs is a single leaf with same label (edge case), keep hierarchy
+        if (Array.isArray(subs) && subs.length > 0) {
+          // Determine whether leaf: if first item has groups undefined and others too
+          const hasGroups = subs.some((s: any) => Array.isArray(s.groups) && s.groups.length > 0)
+          const node: any = { 
+            keyword: tail, 
+            notes: [], 
+            groups: subs, 
+            count: Number(c.notes || 0),
+            expanded: depth < 2 // Auto-expand first two levels
+          }
+          out.push(node)
+        } else {
+          // No deeper children; fetch notes directly
+          const ns = ((window as any).api?.getNotesByTagPrefix?.(c.tag, 500, 0)) || []
+          out.push({ 
+            keyword: tail, 
+            notes: ns, 
+            count: Number(c.notes || ns.length || 0),
+            expanded: depth < 2 // Auto-expand first two levels
+          })
+        }
+      }
+      return out
+    }
+    
+    ;(async () => {
+      try {
+        const tree = await build(currentTagPrefix, 1)
+        if (!alive) return
+        setTagGroups(tree as any)
+      } catch {
+        if (alive) setTagGroups([])
+      }
+    })()
+    return () => { alive = false }
+  }, [currentTagPrefix, onTagPrefixChange])
+
+  // Build AI groups from current visible notes when enabled
+  useEffect(() => {
+    if (!aiGrouping) { setAiGroups([]); return }
+    let alive = true
+    ;(async () => {
+      try {
+        const subset = (notes || []).slice(0, 60)
+        const ids = subset.map((n) => n.note_id)
+        if (!ids.length) { if (alive) setAiGroups([]); return }
+        const res = await (window as any).api?.groupNotesByAI?.(ids, currentQuery)
+        if (!Array.isArray(res) || res.length === 0) { if (alive) setAiGroups([]); return }
+        const byId = new Map<number, any>(subset.map((n: any) => [n.note_id, n]))
+        const mapped = res.map((g: any) => {
+          const idsG = Array.isArray(g?.notes) ? g.notes.map((x: any) => Number(x)).filter((x: number) => byId.has(x)) : []
+          idsG.sort((a: number, b: number) => a - b)
+          const items = idsG.map((id: number) => byId.get(id))
+          return { keyword: String(g.label || ''), notes: items } as TagGroup
+        })
+        mapped.sort((a: any, b: any) => String(a.keyword).localeCompare(String(b.keyword)))
+        if (alive) setAiGroups(mapped)
+      } catch {
+        if (alive) setAiGroups([])
+      }
+    })()
+    return () => { alive = false }
+  }, [aiGrouping, notes, currentQuery])
 
   const ITEM_SIZE = 36
+  const MAX_NOTES_PER_GROUP = 100 // Performance limit for non-virtualized rendering
+  const VIRTUALIZATION_THRESHOLD = 50 // Use virtualization when more than this many notes
+  
+  // Performance optimizations for large note lists:
+  // - Virtualization for notes > VIRTUALIZATION_THRESHOLD
+  // - Memoized components to prevent unnecessary re-renders
+  // - Limited depth (MAX_DEPTH = 3) and children (20 per level) in tag hierarchy
+  // - Truncation of large groups (50 groups max, 30 tag groups max)
+  // - Performance monitoring with total note counts
+
+  // Memoized virtualized note renderer for performance
+  const VirtualizedNotesRenderer = memo(({ 
+    notes, 
+    height = 200 
+  }: { 
+    notes: NoteListItem[]
+    height?: number 
+  }) => {
+    const sortedNotes = useMemo(() => 
+      notes.slice().sort((a: any, b: any) => (b?.__gcos ?? -1) - (a?.__gcos ?? -1)),
+      [notes]
+    )
+
+    if (sortedNotes.length === 0) return null
+
+    return (
+      <VList
+        height={Math.min(height, sortedNotes.length * ITEM_SIZE)}
+        width="100%"
+        itemCount={sortedNotes.length}
+        itemSize={ITEM_SIZE}
+        itemData={{ notes: sortedNotes }}
+        itemKey={(index, data) => (data.notes[index]?.note_id ?? index)}
+        overscanCount={3} // Reduced from 5 to 3 for better memory efficiency
+      >
+        {Row}
+      </VList>
+    )
+  })
+
+  // Memoized inline note renderer for small lists (uses NoteCard)
+  const InlineNotesRenderer = memo(({ notes }: { notes: NoteListItem[] }) => {
+    const sortedNotes = useMemo(() => 
+      notes.slice().sort((a: any, b: any) => (b?.__gcos ?? -1) - (a?.__gcos ?? -1)),
+      [notes]
+    )
+
+    return (
+      <>
+        {sortedNotes.map((n) => (
+          <MemoNoteCard
+            key={n.note_id}
+            n={n}
+            mode={mode}
+            selected={selectedId === n.note_id}
+            selectedIds={selectedIds}
+            onToggleSelect={onToggleSelect}
+            onSelect={onSelect}
+            ioRoot={containerRef.current}
+            variant="line"
+          />
+        ))}
+      </>
+    )
+  })
   const onContainerPointerDownCapture = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     try {
       const target = e.target as HTMLElement
@@ -226,8 +472,14 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
       .replace(/&amp;/g, '&')
       .replace(/\s+/g, ' ')
       .trim()
-    // 5) KaTeX render on a detached element to avoid flicker
+    
+    // 4.5) Filter out problematic Unicode characters that cause KaTeX issues
+    // Remove characters that KaTeX doesn't recognize (like ⌬ U+9004)
+    safeHtml = safeHtml.replace(/[\u9000-\u9004]/g, '?').replace(/\u232C|⌬/g, '?')
+    // 5) KaTeX render on a detached element to avoid flicker (only if math-like delimiters exist)
     const withMath = useMemo(() => {
+      const hasMath = /\$\$|\\\[|\\\(|(^|[^\\])\$/m.test(src)
+      if (!hasMath) return safeHtml
       const tmp = document.createElement('span')
       tmp.innerHTML = safeHtml
       try {
@@ -240,10 +492,13 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
           ],
           throwOnError: false,
           trust: true,
+          strict: false, // Allow non-strict mode to handle unknown characters
         })
-      } catch {}
+      } catch (e) {
+        try { console.warn('KaTeX rendering failed:', e) } catch {}
+      }
       return tmp.innerHTML
-    }, [safeHtml])
+    }, [safeHtml, src])
     return <span className="text-sm flex-1 truncate" dangerouslySetInnerHTML={{ __html: withMath }} />
   }
 
@@ -251,59 +506,21 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
 
   const Row = useCallback(({ index, style, data }: ListChildComponentProps<any>) => {
     const n: NoteListItem = data.notes[index]
+    const selectedIdFromData: number | null = (data as any)?.selectedId ?? null
     return (
-      <button
-        key={n.note_id}
-        style={style}
-        onClick={() => onSelect(n.note_id)}
-        className={`relative w-full text-left px-3 py-1 truncate border-b ${selectedId === n.note_id ? 'bg-sidebar-accent' : ''}`}
-      >
-          {/* Left color badge for classification (shows when set) */}
-          {(typeof (n as any).badge_num === 'number' || n.rerank_category) && (
-            <span
-              className="absolute left-0 top-0 bottom-0 w-[6px] rounded-r-sm"
-              style={{
-                backgroundColor: (() => {
-                  const num = (n as any).badge_num
-                  if (typeof num === 'number') {
-                    // 0 green, 1 blue, 2 amber, 3 gray
-                    return num === 0 ? '#10b981' : num === 1 ? '#3b82f6' : num === 2 ? '#f59e0b' : '#9ca3af'
-                  }
-                  return n.rerank_category === 'in' ? '#ff3b30' : n.rerank_category === 'out' ? '#000000' : n.rerank_category === 'related' ? '#3b82f6' : 'transparent'
-                })()
-              }}
-            />
-          )}
-          <div className="flex items-center gap-2">
-             <input
-               type="checkbox"
-               data-note-select
-               value={n.note_id}
-               className="shrink-0"
-               checked={selectedIds.includes(n.note_id)}
-               onChange={(e) => {
-                 e.stopPropagation()
-                 onToggleSelect && onToggleSelect(n.note_id, (e.target as HTMLInputElement).checked)
-               }}
-               onClick={(e) => e.stopPropagation()}
-               onMouseDown={(e) => e.stopPropagation()}
-             />
-            <PreviewTextMemo value={n.first_field} />
-            {/* Overlap chips */}
-            {Array.isArray((n as any).__overlaps) && (n as any).__overlaps.length > 0 && (
-              <div className="ml-auto flex items-center gap-1">
-                {(n as any).__overlaps.map((o: any, idx: number) => (
-                  <span key={idx} className="text-[10px] rounded-md px-1 py-[1px] bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300" title={`Also matches ${o.keyword}`}>
-                    {o.keyword} {(o.cos * 100).toFixed(1)}%
-                  </span>
-                ))}
-              </div>
-            )}
-            {ScoreBadges(n)}
-          </div>
-      </button>
+      <div key={n.note_id} style={style} className="border-b">
+        <MemoNoteCard
+          n={n}
+          mode={mode}
+          selected={selectedIdFromData === n.note_id}
+          selectedIds={selectedIds}
+          onToggleSelect={onToggleSelect}
+          onSelect={onSelect}
+          ioRoot={outerRef.current}
+        />
+      </div>
     )
-  }, [onSelect, selectedId, selectedIds, onToggleSelect])
+  }, [mode, onSelect, onToggleSelect, selectedIds])
 
   const renderRowInline = (n: NoteListItem) => (
     <button
@@ -326,19 +543,21 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
         />
       )}
       <div className="flex items-center gap-2">
-             <input
-               type="checkbox"
-               data-note-select
-               value={n.note_id}
-               className="shrink-0"
-               checked={selectedIds.includes(n.note_id)}
-               onChange={(e) => {
-                 e.stopPropagation()
-                 onToggleSelect && onToggleSelect(n.note_id, (e.target as HTMLInputElement).checked)
-               }}
-               onClick={(e) => e.stopPropagation()}
-               onPointerDownCapture={(e) => e.stopPropagation()}
-             />
+        {mode === 'select' && (
+          <input
+            type="checkbox"
+            data-note-select
+            value={n.note_id}
+            className="shrink-0"
+            checked={selectedIds.includes(n.note_id)}
+            onChange={(e) => {
+              e.stopPropagation()
+              onToggleSelect && onToggleSelect(n.note_id, (e.target as HTMLInputElement).checked)
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onPointerDownCapture={(e) => e.stopPropagation()}
+          />
+        )}
         <PreviewTextMemo value={n.first_field} />
         {Array.isArray((n as any).__overlaps) && (n as any).__overlaps.length > 0 && (
           <div className="ml-auto flex items-center gap-1">
@@ -354,30 +573,395 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
     </button>
   )
 
-  if (Array.isArray(groups) && groups.length > 0) {
+  // Component to render hierarchical tag groups with improved UI/UX and accessibility
+  // - Full-width design extending to the right edge of the note list
+  // - Thinner profile with reduced padding and smaller font sizes
+  // - More curved corners (rounded-lg) for a softer appearance
+  // - Note count displayed on the right side in a rounded badge
+  // - Larger toggle target with keyboard support (Enter/Space)
+  // - Smooth expand/collapse animation and indentation per depth
+  // - Aggregated count badge (notes + nested) positioned on the right
+  // - Click anywhere on the header to toggle
+  // - Global expand/collapse controls with visual feedback
+  // - Better visual hierarchy with proper spacing and gradients
+  const TagGroupComponent = React.memo(({ 
+    group, 
+    depth = 0, 
+    expandVersion, 
+    defaultExpanded 
+  }: { 
+    group: TagGroup; 
+    depth?: number; 
+    expandVersion?: number; 
+    defaultExpanded?: boolean 
+  }) => {
+    const [expanded, setExpanded] = useState<boolean>(Boolean(typeof defaultExpanded === 'boolean' ? defaultExpanded : (group.expanded || depth < 2)))
+    const hasSubGroups = Array.isArray(group.groups) && group.groups.length > 0
+    const hasNotes = Array.isArray(group.notes) && group.notes.length > 0
+    const canExpand = hasSubGroups || hasNotes
+
+    // Respond to parent "expand all / collapse all" commands
+    useEffect(() => {
+      if (typeof defaultExpanded === 'boolean') setExpanded(defaultExpanded)
+    }, [expandVersion, defaultExpanded])
+
+    // Compute aggregated unique note count (union of note_ids across this group and sub-groups)
+    const totalCount = useMemo(() => {
+      const ids = new Set<number>()
+      const add = (g: TagGroup): void => {
+        if (Array.isArray(g.notes)) g.notes.forEach((n: any) => ids.add(Number(n?.note_id)))
+        if (Array.isArray(g.groups)) g.groups.forEach(add)
+      }
+      add(group)
+      return ids.size
+    }, [group])
+
+    // Indentation guide per level
+    const indentStyle = { marginLeft: `${Math.max(0, depth) * 12}px` }
+
     return (
-      <div ref={containerRef} className="min-h-0 h-full overflow-y-auto">
-        {groups.map((g) => (
-          <div key={g.keyword} className="mb-3">
-            <div className="sticky top-0 z-10 px-3 py-1.5 text-xs font-semibold">
-              <span className="inline-flex items-center gap-2 rounded-full px-2 py-0.5 bg-blue-600 text-white shadow">
-                <span>{g.keyword}</span>
-                {typeof g.kcos === 'number' && g.kcos >= 0 && (
-                  <span className="text-[10px] rounded bg-white/20 px-1 py-[1px]">{(g.kcos * 100).toFixed(1)}%</span>
+      <div className="mb-1" style={indentStyle}>
+        {/* Header - Full width, thinner design */}
+        <div className="sticky top-0 z-10">
+          <button
+            className="w-full text-left"
+            onClick={() => canExpand && setExpanded((v) => !v)}
+            onKeyDown={(e) => {
+              if (!canExpand) return
+              if (e.key === 'Enter' || e.key === ' ') { 
+                e.preventDefault(); 
+                setExpanded((v) => !v) 
+              }
+            }}
+            aria-expanded={expanded}
+            aria-label={`${expanded ? 'Collapse' : 'Expand'} ${group.keyword}`}
+          >
+            <div className="flex items-center justify-between w-full px-3 py-1 bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-sm hover:shadow-md hover:brightness-105 active:brightness-95 transition-all duration-150 rounded-lg">
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                {canExpand ? (
+                  <span className="inline-flex items-center justify-center w-4 h-4 rounded bg-white/10 flex-shrink-0">
+                    {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                  </span>
+                ) : (
+                  <span className="w-4 h-4 flex-shrink-0" />
                 )}
-                {typeof g.gbm25 === 'number' && (
-                  <span className="text-[10px] rounded bg-white/20 px-1 py-[1px]">BM25 {g.gbm25.toFixed(2)}</span>
+                <span className="truncate text-xs font-medium" title={group.keyword}>{group.keyword}</span>
+                {typeof group.kcos === 'number' && group.kcos >= 0 && (
+                  <span className="text-[10px] rounded bg-white/20 px-1 py-[1px] flex-shrink-0">{(group.kcos * 100).toFixed(1)}%</span>
                 )}
-              </span>
+                {typeof group.gbm25 === 'number' && (
+                  <span className="text-[10px] rounded bg-white/20 px-1 py-[1px] flex-shrink-0">BM25 {group.gbm25.toFixed(2)}</span>
+                )}
+              </div>
+              {totalCount > 0 && (
+                <span className="text-xs font-semibold bg-white/20 rounded-full px-2 py-0.5 flex-shrink-0 ml-2">
+                  {totalCount}
+                </span>
+              )}
             </div>
-            <div className="mt-1 rounded-lg border bg-white/70 dark:bg-zinc-900/30 divide-y shadow-sm">
-              {g.notes
-                .slice()
-                .sort((a: any, b: any) => (b?.__gcos ?? -1) - (a?.__gcos ?? -1))
-                .map((n) => renderRowInline(n))}
+          </button>
+        </div>
+
+        {/* Content with animation */}
+        <div className={`transition-all duration-200 ease-in-out overflow-hidden ${expanded ? 'max-h-[3000px] opacity-100' : 'max-h-0 opacity-0'}`}>
+          <div className="mt-1 border bg-white/80 dark:bg-zinc-900/40 divide-y shadow-sm">
+            {/* Direct notes - always use inline rendering to avoid separate scroll containers */}
+            {hasNotes && (
+              <InlineNotesRenderer notes={group.notes} />
+            )}
+            
+            {/* Sub-groups - limit depth and use lazy loading */}
+            {hasSubGroups && depth < 3 && group.groups!.slice(0, 20).map((subGroup, index) => (
+              <TagGroupComponent
+                key={`${subGroup.keyword}-${index}`}
+                group={subGroup}
+                depth={depth + 1}
+                expandVersion={expandVersion}
+                defaultExpanded={defaultExpanded}
+              />
+            ))}
+            
+            {/* Show truncation message for large groups */}
+            {hasSubGroups && group.groups!.length > 20 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground bg-yellow-50 dark:bg-yellow-900/20 border-t">
+                Showing first 20 of {group.groups!.length} sub-groups. Use search to narrow results.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }, (prev, next) => {
+    return prev.group === next.group && prev.depth === next.depth && prev.expandVersion === next.expandVersion && prev.defaultExpanded === next.defaultExpanded
+  })
+
+  // Tag navigation breadcrumbs with dropdown functionality (similar to TagNotesOverlay)
+  // Shows hierarchical tag path with clickable breadcrumbs and dropdown menus for tag navigation
+  const TagNavigation = () => {
+    if (!currentTagPrefix || !onTagPrefixChange) return null
+    
+    const [drop, setDrop] = useState<null | { idx: number; items: Array<{ tag: string; notes: number }>; query: string; rect: { left: number; top: number; bottom: number; width: number } }>(null)
+    
+    const parts = currentTagPrefix.split('::').filter(Boolean)
+    const buildPrefix = (idx: number) => parts.slice(0, idx + 1).join('::')
+    const buildParent = (idx: number) => parts.slice(0, Math.max(0, idx)).join('::')
+    
+    const onCrumbClick = (idx: number, ev: React.MouseEvent) => {
+      const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect()
+      const parent = buildParent(idx)
+      try {
+        let rows = ((window as any).api?.getChildTags?.(parent)) || []
+        if ((!rows || rows.length === 0) && (window as any).api?.listAllTags) {
+          // Fallback: compute from full tag list
+          const all: Array<{ tag: string; notes: number }> = ((window as any).api?.listAllTags?.()) || []
+          const map = new Map<string, number>()
+          for (const r of all) {
+            const t = String(r.tag || '')
+            if (parent) {
+              if (t === parent || t.startsWith(parent + '::')) {
+                const rest = t.slice(parent.length)
+                if (rest.startsWith('::')) {
+                  const after = rest.slice(2)
+                  const child = after.includes('::') ? after.slice(0, after.indexOf('::')) : after
+                  const full = parent + '::' + child
+                  map.set(full, (map.get(full) || 0) + Number(r.notes || 0))
+                }
+              }
+            } else {
+              const head = t.includes('::') ? t.slice(0, t.indexOf('::')) : t
+              map.set(head, (map.get(head) || 0) + Number(r.notes || 0))
+            }
+          }
+          rows = Array.from(map.entries()).map(([tag, notes]) => ({ tag, notes }))
+        }
+        setDrop({ idx, items: rows || [], query: '', rect: { left: rect.left, top: rect.top, bottom: rect.bottom, width: rect.width } })
+      } catch {
+        setDrop({ idx, items: [], query: '', rect: { left: rect.left, top: rect.top, bottom: rect.bottom, width: rect.width } })
+      }
+    }
+    
+    // Close dropdown on outside click or ESC
+    useEffect(() => {
+      if (!drop) return
+      const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDrop(null) }
+      const onClick = (e: MouseEvent) => {
+        try {
+          const target = e.target as HTMLElement
+          // If click is inside our menu, ignore
+          if (target.closest && target.closest('.tag-sibling-menu')) return
+        } catch {}
+        setDrop(null)
+      }
+      window.addEventListener('keydown', onKey)
+      window.addEventListener('mousedown', onClick)
+      return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('mousedown', onClick) }
+    }, [drop])
+    
+    return (
+      <div className="sticky top-0 z-20 bg-background/80 backdrop-blur border-b px-3 py-2">
+        <div className="text-sm font-semibold flex items-center gap-2 flex-wrap">
+          <span className="text-xs uppercase tracking-wider text-muted-foreground">Tag</span>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {parts.map((p, idx) => {
+              const full = buildPrefix(idx)
+              return (
+                <div key={full} className="flex items-center gap-1.5">
+                  {idx > 0 && <span className="text-muted-foreground">{` \\ `}</span>}
+                  <button
+                    className="underline text-sky-700 hover:text-sky-900 dark:text-sky-300 text-[12px] max-w-[28ch] truncate"
+                    onClick={(e) => onCrumbClick(idx, e)}
+                    title={`Choose a different '${p}' at this level`}
+                  >
+                    {idx === 0 && !p.startsWith('#') ? `#${p}` : p}
+                  </button>
+                </div>
+              )
+            })}
+            {/* Blank slot to go deeper if children exist */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-muted-foreground">{` \\ `}</span>
+              <button
+                className="underline text-sky-700 hover:text-sky-900 dark:text-sky-300 text-[12px]"
+                title="Choose a deeper subtag"
+                onClick={(e) => onCrumbClick(parts.length, e)}
+              >
+                ...
+              </button>
+            </div>
+            {/* Clear all button */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-muted-foreground">{` \\ `}</span>
+              <button
+                className="underline text-sky-700 hover:text-sky-900 dark:text-sky-300 text-[12px]"
+                onClick={() => onTagPrefixChange('')}
+                title="Clear tag filter"
+              >
+                Clear
+              </button>
             </div>
           </div>
-        ))}
+        </div>
+        
+        {/* Dropdown menu */}
+        {drop && (
+          <div className="fixed z-50 tag-sibling-menu" style={{ left: drop.rect.left, top: drop.rect.bottom + 6, minWidth: Math.max(220, drop.rect.width) }}>
+            <div className="rounded-md border bg-white shadow-xl dark:bg-zinc-900/95 dark:border-zinc-700 p-1">
+              <div className="max-h-64 overflow-auto">
+                {drop.items.map((s) => {
+                  const label = (s.tag.split('::').pop() || s.tag)
+                  return (
+                    <button
+                      key={s.tag}
+                      className="w-full text-left text-[12px] px-3 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between"
+                      onClick={() => { onTagPrefixChange(s.tag); setDrop(null) }}
+                      title={s.tag}
+                    >
+                      <span className="truncate">{label}</span>
+                      <span className="text-[10px] opacity-70 ml-2">{s.notes}</span>
+                    </button>
+                  )
+                })}
+                {drop.items.length === 0 && (
+                  <div className="text-[12px] text-muted-foreground px-2 py-1">No options</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // AI grouping view
+  if (aiGrouping && aiGroups.length > 0) {
+    return (
+      <div ref={containerRef} className="min-h-0 h-full overflow-y-auto">
+        <div className="sticky top-0 z-20 bg-background/80 backdrop-blur border-b px-3 py-2 flex items-center justify-between w-full">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-foreground">AI Groups</span>
+            <span className="text-xs text-muted-foreground">({aiGroups.length} groups, {totalNotesAi} notes)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button className="text-xs px-3 py-1 rounded-md border bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/20 dark:text-emerald-300 dark:hover:bg-emerald-900/30 transition-colors" onClick={() => setExpandedAiKeys(new Set(aiRowsMemo.keys))}>
+              <ChevronDown className="w-3 h-3 inline mr-1" />
+              Expand All
+            </button>
+            <button className="text-xs px-3 py-1 rounded-md border bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors" onClick={() => setExpandedAiKeys(new Set())}>
+              <ChevronRight className="w-3 h-3 inline mr-1" />
+              Collapse All
+            </button>
+          </div>
+        </div>
+        <VList
+          height={height}
+          width={'100%'}
+          itemCount={aiRowsMemo.rows.length}
+          itemSize={ITEM_SIZE}
+          itemKey={(index) => {
+            const r = aiRowsMemo.rows[index] as any
+            return r.type === 'header' ? `h:${r.key}` : `n:${r.note.note_id}`
+          }}
+        >
+          {({ index, style }) => {
+            const row = aiRowsMemo.rows[index] as any
+            if (row.type === 'header') {
+              const isOpen = expandedAiKeys.has(row.key)
+              return (
+                <div style={style} className="px-3 py-1 bg-gradient-to-r from-blue-600 to-blue-700 text-white" onClick={() => {
+                  const next = new Set(expandedAiKeys)
+                  if (isOpen) next.delete(row.key); else next.add(row.key)
+                  setExpandedAiKeys(next)
+                }}>
+                  <div className="flex items-center justify-between" style={{ marginLeft: `${row.depth * 12}px` }}>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded bg-white/10 flex-shrink-0">{isOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}</span>
+                      <span className="truncate text-xs font-medium" title={row.label}>{row.label}</span>
+                      {typeof row.kcos === 'number' && row.kcos >= 0 && (
+                        <span className="text-[10px] rounded bg-white/20 px-1 py-[1px] flex-shrink-0">{(row.kcos * 100).toFixed(1)}%</span>
+                      )}
+                      {typeof row.gbm25 === 'number' && (
+                        <span className="text-[10px] rounded bg-white/20 px-1 py-[1px] flex-shrink-0">BM25 {row.gbm25.toFixed(2)}</span>
+                      )}
+                    </div>
+                    <span className="text-xs font-semibold bg-white/20 rounded-full px-2 py-0.5 flex-shrink-0 ml-2">{row.count}</span>
+                  </div>
+                </div>
+              )
+            }
+            const note = row.note as NoteListItem
+            return (
+              <div style={style} className="border-b">
+                <MemoNoteCard
+                  n={note}
+                  mode={mode}
+                  selected={selectedId === note.note_id}
+                  selectedIds={selectedIds}
+                  onToggleSelect={onToggleSelect}
+                  onSelect={onSelect}
+                  ioRoot={containerRef.current}
+                  variant="line"
+                />
+              </div>
+            )
+          }}
+        </VList>
+      </div>
+    )
+  }
+
+  // Show tag navigation with hierarchical grouping when not in groups mode
+  // Includes dropdown menus for tag navigation and hierarchical grouping of notes and sub-tags
+  if (currentTagPrefix && onTagPrefixChange) {
+    return (
+      <div ref={containerRef} className="min-h-0 h-full overflow-y-auto">
+        <TagNavigation />
+        <VList
+          height={height}
+          width={'100%'}
+          itemCount={tagRowsMemo.rows.length}
+          itemSize={ITEM_SIZE}
+          itemKey={(index) => {
+            const r = tagRowsMemo.rows[index] as any
+            return r.type === 'header' ? `th:${r.key}` : `tn:${r.note.note_id}`
+          }}
+        >
+          {({ index, style }) => {
+            const row = tagRowsMemo.rows[index] as any
+            if (row.type === 'header') {
+              const isOpen = expandedTagKeys.has(row.key)
+              return (
+                <div style={style} className="px-3 py-1 bg-gradient-to-r from-blue-600 to-blue-700 text-white" onClick={() => {
+                  const next = new Set(expandedTagKeys)
+                  if (isOpen) next.delete(row.key); else next.add(row.key)
+                  setExpandedTagKeys(next)
+                }}>
+                  <div className="flex items-center justify-between" style={{ marginLeft: `${row.depth * 12}px` }}>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="inline-flex items-center justify-center w-4 h-4 rounded bg-white/10 flex-shrink-0">{isOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}</span>
+                      <span className="truncate text-xs font-medium" title={row.label}>{row.label}</span>
+                    </div>
+                    <span className="text-xs font-semibold bg-white/20 rounded-full px-2 py-0.5 flex-shrink-0 ml-2">{row.count}</span>
+                  </div>
+                </div>
+              )
+            }
+            const note = row.note as NoteListItem
+            return (
+              <div style={style} className="border-b">
+                <MemoNoteCard
+                  n={note}
+                  mode={mode}
+                  selected={selectedId === note.note_id}
+                  selectedIds={selectedIds}
+                  onToggleSelect={onToggleSelect}
+                  onSelect={onSelect}
+                  ioRoot={containerRef.current}
+                  variant="line"
+                />
+              </div>
+            )
+          }}
+        </VList>
       </div>
     )
   }
@@ -389,9 +973,9 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
         width={'100%'}
         itemCount={notes.length}
         itemSize={ITEM_SIZE}
-        itemData={{ notes }}
+        itemData={{ notes, selectedId }}
         itemKey={(index, data) => (data.notes[index]?.note_id ?? index)}
-        overscanCount={20}
+        overscanCount={4}
         outerRef={outerRef as any}
         onScroll={(() => {
           let last = 0

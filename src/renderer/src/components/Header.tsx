@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { Settings } from 'lucide-react'
+import React, { useEffect, useState } from 'react'
+import { Settings, Menu } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Slider } from '@/components/ui/slider'
 
@@ -11,10 +11,7 @@ type HeaderProps = {
   onHybrid?: (query: string) => void
   onUnsuspend?: (noteIds: number[]) => void
   onOpenSettings: () => void
-  onOpenEpub?: (file: File) => void
-  readerActive?: boolean
-  onEnterReader?: () => void
-  onExitReader?: () => void
+  onOpenTags?: () => void
   searching?: boolean
   semanticRunning?: boolean
   selectedIds?: number[]
@@ -27,101 +24,50 @@ type HeaderProps = {
   onToggleGroupByBadge?: () => void
   onGroupSelectBadge?: (badge: 0 | 1 | 2 | 3) => void
   onGroupUnselectBadge?: (badge: 0 | 1 | 2 | 3) => void
-  route?: 'notes' | 'epub' | 'pdf'
-  // New: BM25 resorting from selected keywords post semantic search
-  onBm25FromTerms?: (terms: string[]) => void
-  // New: Keyword grouping toggle
+  // AI grouping toggle
   onToggleKeywordGrouping?: () => void
   keywordGrouping?: boolean
 }
 
-export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid, onUnsuspend, onOpenSettings, onOpenEpub, readerActive = false, onEnterReader, onExitReader, searching = false, semanticRunning = false, selectedIds = [], mode = 'default', cosThreshold = 0, onChangeCosThreshold, badgeCounts = [], grouped = false, onToggleGroupByBadge, onGroupSelectBadge, onGroupUnselectBadge, route, onBm25FromTerms, onToggleKeywordGrouping, keywordGrouping = false }: HeaderProps): React.JSX.Element {
+export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid, onUnsuspend, onOpenSettings, onOpenTags, searching = false, semanticRunning = false, selectedIds = [], mode = 'default', cosThreshold = 0, onChangeCosThreshold, badgeCounts = [], grouped = false, onToggleGroupByBadge, onGroupSelectBadge, onGroupUnselectBadge, onToggleKeywordGrouping, keywordGrouping = false, onOpenPdf }: HeaderProps & { onOpenPdf?: () => void }): React.JSX.Element {
   const [q, setQ] = useState('')
-  const [keywords, setKeywords] = useState<string[]>([])
-  const [showAllKeywords, setShowAllKeywords] = useState(false)
-  // no longer used with toggle-based keyword filtering
-  // const excludeRef = useRef<string[]>([])
-  // const debounceRef = useRef<number | null>(null)
-  const fileRef = useRef<HTMLInputElement | null>(null)
-  const [menuOpen, setMenuOpen] = useState(false)
+  // No route menu
   const [activeBadges, setActiveBadges] = useState<number[]>([])
-  const [selectedTerms, setSelectedTerms] = useState<string[]>([])
   // Debounced real-time search
   useEffect(() => {
     const id = setTimeout(() => { onSearch(q); (window as any).__current_query = q }, 200)
     return () => clearTimeout(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q])
-  // Debounced keyword extraction for UI chips (fuzzy, rerank, semantic, hybrid)
-  useEffect(() => {
-    if (mode !== 'fuzzy' && mode !== 'rerank' && mode !== 'semantic' && mode !== 'hybrid') {
-      setKeywords([])
-      setSelectedTerms([])
-      return
-    }
-    const id = setTimeout(() => {
-      try {
-        const kws = window.api?.extractQueryKeywords?.(q) ?? []
-        setKeywords(kws)
-        // prune selections to present keywords
-        setSelectedTerms((prev) => prev.filter((t) => kws.includes(t)))
-      } catch {
-        setKeywords([])
-      }
-    }, 250)
-    return () => clearTimeout(id)
-  }, [q, mode])
-
-  // When keyword selection changes, trigger BM25 search (fuzzy) or reordering (rerank/semantic/hybrid)
-  useEffect(() => {
-    if (!onBm25FromTerms) return
-    if (mode === 'rerank' || mode === 'semantic' || mode === 'hybrid') onBm25FromTerms(selectedTerms)
-    if (mode === 'fuzzy') {
-      if (selectedTerms.length > 0) onBm25FromTerms(selectedTerms)
-      else onFuzzy(q)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTerms, mode])
   return (
     <div className="p-2 border-b sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex items-center gap-2 relative">
-        {/* Hamburger menu */}
-        <div className="relative">
+        {/* Hamburger for Tag Manager */}
+        <button
+          className="inline-flex items-center justify-center w-8 h-8 rounded border bg-white hover:bg-zinc-50 dark:bg-zinc-900/30 dark:hover:bg-zinc-800/50"
+          title="Open Tag Manager"
+          onClick={() => onOpenTags && onOpenTags()}
+        >
+          <Menu className="w-4 h-4" />
+        </button>
+        {onOpenPdf && (
           <button
-            aria-label="Menu"
-            className="px-2 py-1 rounded border text-sm"
-            onClick={() => setMenuOpen((v) => !v)}
+            className="inline-flex items-center justify-center w-8 h-8 rounded border bg-amber-400/90 text-black hover:bg-amber-400"
+            title="Open PDF page"
+            onClick={() => onOpenPdf?.()}
           >
-            ☰
+            <span className="text-[10px] font-bold">PDF</span>
           </button>
-          {menuOpen && (
-            <div className="absolute z-20 mt-2 w-48 rounded border bg-white shadow-lg">
-              <button
-                className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100"
-                onClick={() => { setMenuOpen(false); onExitReader && onExitReader() }}
-              >
-                Notes browser
-              </button>
-              <button
-                className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100"
-                onClick={() => { setMenuOpen(false); onEnterReader && onEnterReader() }}
-              >
-                EPUB reader
-              </button>
-              <button className="w-full text-left px-3 py-2 text-sm hover:bg-zinc-100" onClick={() => { setMenuOpen(false); window.dispatchEvent(new CustomEvent('open-pdf-reader')) }}>PDF reader</button>
-            </div>
-          )}
-        </div>
+        )}
         {(() => {
           const isMultiline = q.includes('\n')
-          const isPdf = (route ?? (window as any).__route) === 'pdf'
           if (!isMultiline) {
             return (
               <input
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && onSearch(q)}
-                placeholder={readerActive ? (isPdf ? 'Search PDFs...' : 'Search books...') : 'Search notes...'}
+                placeholder={'Search notes...'}
                 className="flex-1 px-3 py-2 rounded-md bg-background border"
               />
             )
@@ -134,13 +80,12 @@ export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid,
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) onSearch(q)
               }}
-              placeholder={readerActive ? (isPdf ? 'Search PDFs...' : 'Search books...') : 'Search notes...'}
+              placeholder={'Search notes...'}
               rows={rows}
               className="flex-1 px-3 py-2 rounded-md bg-background border resize-y"
             />
           )
         })()}
-        {!readerActive && (
         <Button
           className="bg-blue-600 text-white hover:bg-blue-700 active:translate-y-[1px] active:shadow-inner"
           onClick={() => onFuzzy(q)}
@@ -148,75 +93,27 @@ export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid,
         >
           Fuzzy Search
         </Button>
-        )}
-        {!readerActive && (
-        <Button
-          className={`text-white active:translate-y-[1px] active:shadow-inner ${semanticRunning ? 'bg-orange-400' : 'bg-orange-500 hover:bg-orange-600'}`}
-          onClick={() => onSemantic(q)}
-          disabled={semanticRunning}
-        >
-          {semanticRunning ? (
-            <span className="inline-flex items-center gap-2">
-              <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
-              Reranking…
-            </span>
-          ) : (
-            'Reranking'
-          )}
-        </Button>
-        )}
-        {!readerActive && onEmbedSearch && (
+        {onEmbedSearch && (
           <Button
-            className="bg-purple-600 text-white hover:bg-purple-700 active:translate-y-[1px] active:shadow-inner"
+            className="bg-orange-600 text-white hover:bg-orange-700 active:translate-y-[1px] active:shadow-inner"
             onClick={() => onEmbedSearch(q)}
           >
             Semantic Search
           </Button>
         )}
-        {!readerActive && onHybrid && (
+        {onHybrid && (
           <Button
-            className="bg-teal-600 text-white hover:bg-teal-700 active:translate-y-[1px] active:shadow-inner"
+            className="bg-purple-600 text-white hover:bg-purple-700 active:translate-y-[1px] active:shadow-inner"
             onClick={() => onHybrid(q)}
           >
             Hybrid
           </Button>
-        )}
-        {/* Badge classification trigger */}
-        {!readerActive && (
-          <Button
-            className="bg-black text-white hover:bg-black/90 active:translate-y-[1px] active:shadow-inner"
-            onClick={() => {
-              const event = new CustomEvent('classify-badges', { detail: { query: q } })
-              window.dispatchEvent(event)
-            }}
-          >
-            Classify Badges
-          </Button>
-        )}
-        {readerActive && ((route ?? (window as any).__route) === 'pdf') && (
-          <Button variant="secondary" onClick={() => window.dispatchEvent(new CustomEvent('pdf-import-click'))}>Import PDF</Button>
-        )}
-        {readerActive && ((route ?? (window as any).__route) !== 'pdf') && (
-          <Button variant="secondary" onClick={() => fileRef.current?.click()}>Import Book</Button>
         )}
       {searching && (
         <span className="flex items-center gap-2 text-xs text-muted-foreground select-none">
           <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
           Searching…
         </span>
-      )}
-      {onOpenEpub && (
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".epub"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) onOpenEpub(f)
-            if (fileRef.current) fileRef.current.value = ''
-          }}
-        />
       )}
       <Button variant="ghost" size="icon" onClick={onOpenSettings}>
         <Settings className="h-5 w-5" />
@@ -256,8 +153,36 @@ export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid,
                 ))}
               </div>
             </div>
+            {/* Post-search filtering buttons */}
+            <div className="flex items-center gap-2 ml-4">
+              <Button
+                className={`text-white active:translate-y-[1px] active:shadow-inner ${semanticRunning ? 'bg-orange-400' : 'bg-orange-500 hover:bg-orange-600'}`}
+                onClick={() => onSemantic(q)}
+                disabled={semanticRunning}
+                size="sm"
+              >
+                {semanticRunning ? (
+                  <span className="inline-flex items-center gap-2">
+                    <span className="inline-block h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+                    Reranking…
+                  </span>
+                ) : (
+                  'Reranking'
+                )}
+              </Button>
+              <Button
+                className="bg-black text-white hover:bg-black/90 active:translate-y-[1px] active:shadow-inner"
+                onClick={() => {
+                  const event = new CustomEvent('classify-badges', { detail: { query: q } })
+                  window.dispatchEvent(event)
+                }}
+                size="sm"
+              >
+                Classify Badges
+              </Button>
+            </div>
             {/* Inline badge toggles */}
-            {!readerActive && Array.isArray(badgeCounts) && badgeCounts.some((c) => c > 0) && (
+            {Array.isArray(badgeCounts) && badgeCounts.some((c) => c > 0) && (
               <div className="flex items-center gap-2 whitespace-nowrap overflow-x-auto no-scrollbar ml-4">
                 <button
                   className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 border shadow-sm bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900/40 dark:hover:bg-zinc-800/60 transition-colors"
@@ -292,68 +217,20 @@ export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid,
                 })}
               </div>
             )}
-            {/* Group by Keywords toggle */}
-            {!readerActive && (
+            {/* Group by AI toggle */}
               <button
                 className="ml-2 inline-flex items-center gap-1 rounded-full px-2.5 py-1 border shadow-sm bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900/40 dark:hover:bg-zinc-800/60 transition-colors"
                 onClick={() => onToggleKeywordGrouping && onToggleKeywordGrouping()}
-                title={keywordGrouping ? 'Ungroup by Keywords' : 'Group by Keywords'}
+                title={keywordGrouping ? 'Ungroup AI Groups' : 'Group by AI'}
               >
-                {keywordGrouping ? 'Ungroup by Keywords' : 'Group by Keywords'}
+                {keywordGrouping ? 'Ungroup AI Groups' : 'Group by AI'}
               </button>
-            )}
           </div>
         )
       })()}
-      {(((mode === 'fuzzy' || mode === 'rerank' || mode === 'semantic' || mode === 'hybrid') && keywords.length > 0) && !keywordGrouping) || (onUnsuspend && selectedIds.length > 0) ? (
+      {(onUnsuspend && selectedIds.length > 0) ? (
         <div className="mt-2 flex items-start justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-          {(mode === 'fuzzy' || mode === 'rerank' || mode === 'semantic' || mode === 'hybrid') && !keywordGrouping && (() => {
-            const VISIBLE = 13
-            const display = showAllKeywords ? keywords : keywords.slice(0, VISIBLE)
-            const moreCount = Math.max(0, keywords.length - display.length)
-            // palette not used in toggle style
-            return (
-              <>
-                {display.map((k) => {
-                  return (
-                    <button
-                      key={k}
-                      className={`text-[11px] rounded-full px-2 py-0.5 border ${selectedTerms.includes(k) ? 'bg-blue-600 text-white border-blue-600' : 'bg-sky-50 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300 border-sky-200 dark:border-sky-800'}`}
-                      onClick={() => {
-                        if (mode === 'rerank') {
-                          setSelectedTerms((prev) => prev.includes(k) ? prev.filter((t) => t !== k) : [...prev, k])
-                        } else {
-                          // fuzzy mode: toggle selection filters for BM25
-                          setSelectedTerms((prev) => prev.includes(k) ? prev.filter((t) => t !== k) : [...prev, k])
-                        }
-                      }}
-                    >
-                      {k}
-                    </button>
-                  )
-                })}
-                {selectedTerms.length > 0 && (
-                  <button
-                    className="text-[11px] rounded-full px-2 py-0.5 border bg-amber-600 text-white border-amber-600"
-                    onClick={() => setSelectedTerms([])}
-                  >
-                    Clear
-                  </button>
-                )}
-                {moreCount > 0 && (
-                  <button
-                    className="text-[11px] rounded-md px-1.5 py-0.5 bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                    onClick={() => setShowAllKeywords((v) => !v)}
-                    title={showAllKeywords ? 'Collapse keywords' : 'Show all keywords'}
-                  >
-                    {showAllKeywords ? 'Show less' : `… +${moreCount}`}
-                  </button>
-                )}
-              </>
-            )
-          })()}
-          </div>
+          <div className="flex flex-wrap items-center gap-2"></div>
           {onUnsuspend && selectedIds.length > 0 ? (
             <button
               className="text-[11px] rounded-md px-2 py-0.5 bg-emerald-600 text-white hover:bg-emerald-700"

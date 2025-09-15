@@ -1,0 +1,83 @@
+// Aggregate and expose the public preload API with the same surface as before
+import { getSetting, setSetting } from './db/settings'
+import { listAllTags, getChildTags } from './db/tags'
+import { listNotes, searchNotes, getNoteDetails, countNotes, getNotesByTag, getNotesByTagPrefix } from './db/notes'
+import { getFirstFieldsForIds, getBackFieldsForIds, frontIsVisible } from './db/fields'
+import { getEmbDb, getEmbeddingProgress, migrateEmbeddingsTo4096 } from './embeddings/core'
+import { getPrecomputedRelated, setPrecomputedRelated } from './embeddings/precomputed'
+import { getHnswIndex, getHnswBuildStatus, buildVectorIndexHNSW } from './embeddings/hnsw'
+import { extractQueryKeywords, extractKeywordsForNotes, extractFrontKeyIdeas, getTopKeywordsForNote } from './keywords/extract'
+import { extractFrontKeyIdeasLLM } from './keywords/llm'
+import { getKeywordEmbeddings, cosineForTerms, embedCosForTermAgainstNotes, embedCosForTermsComboAgainstNotes, clusterKeywords } from './keywords/embeddings'
+import { bm25ForNotesByTerms, searchByBm25Terms, getRelatedByBm25 } from './api/search/bm25'
+import { fuzzySearch } from './api/search/fuzzy'
+import { embedSearch, getRelatedByEmbedding, getRelatedByEmbeddingTerms } from './api/search/embed'
+import { hybridSemanticModulated, hybridSemanticModulatedFromNote } from './api/search/hybrid'
+import { semanticRerank, semanticRerankSmall } from './api/search/rerank'
+import { pingAnkiConnect, openInAnki, unsuspendNotes } from './anki/connect'
+import { runIngest } from './jobs/ingest'
+import { startEmbedding, stopEmbedding } from './jobs/embedding'
+
+export const api = {
+  // settings
+  getSetting,
+  setSetting,
+  // tags
+  listAllTags,
+  getChildTags,
+  // notes
+  listNotes,
+  searchNotes,
+  getNoteDetails,
+  countNotes,
+  getNotesByTag,
+  getNotesByTagPrefix,
+  // fields/utils
+  getFirstFieldsForIds,
+  getBackFieldsForIds,
+  frontIsVisible,
+  // embeddings/core
+  getEmbDb,
+  getEmbeddingProgress,
+  migrateEmbeddingsTo4096,
+  // precomputed/hnsw
+  getPrecomputedRelated,
+  setPrecomputedRelated,
+  getHnswIndex,
+  getHnswBuildStatus,
+  buildVectorIndexHNSW,
+  // keywords
+  extractQueryKeywords,
+  extractKeywordsForNotes,
+  extractFrontKeyIdeas,
+  getTopKeywordsForNote,
+  extractFrontKeyIdeasLLM,
+  getKeywordEmbeddings,
+  cosineForTerms,
+  embedCosForTermAgainstNotes,
+  embedCosForTermsComboAgainstNotes,
+  clusterKeywords,
+  // search
+  bm25ForNotesByTerms,
+  searchByBm25Terms,
+  getRelatedByBm25,
+  fuzzySearch,
+  embedSearch,
+  getRelatedByEmbedding,
+  getRelatedByEmbeddingTerms,
+  hybridSemanticModulated,
+  hybridSemanticModulatedFromNote,
+  semanticRerank,
+  semanticRerankSmall,
+  // anki & jobs
+  pingAnkiConnect,
+  openInAnki,
+  unsuspendNotes,
+  runIngest,
+  startEmbedding,
+  stopEmbedding
+}
+
+export type Api = typeof api
+
+

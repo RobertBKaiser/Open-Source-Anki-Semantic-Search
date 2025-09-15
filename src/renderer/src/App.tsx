@@ -1,18 +1,28 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Header } from '@/components/Header'
 import { NoteList } from '@/components/NoteList'
-import { NoteDetails } from '@/components/NoteDetails'
+import NoteDetailsView from '@/components/NoteDetailsView'
 import { SettingsSheet } from '@/components/SettingsSheet'
 import { FooterBar } from '@/components/FooterBar'
-import { EpubViewer } from '@/components/EpubViewer'
-import { EpubLibrary, type LibraryBook } from '@/components/EpubLibrary'
-import { EpubNotesPanel } from '@/components/EpubNotesPanel'
-import { PDFReader } from '@/components/PDFReader'
-import ePub from 'epubjs'
+import { TagManager } from '@/components/TagManager'
+import { PdfPage } from '@/components/PdfPage'
+// Removed EPUB/PDF reader features
 
 type NoteRow = { note_id: number; first_field: string | null }
 
+// TagGroup type for hierarchical tag groups with expand/collapse functionality
+type TagGroup = {
+  keyword: string
+  notes: any[]
+  kcos?: number
+  gbm25?: number
+  groups?: TagGroup[]
+  count?: number
+  expanded?: boolean
+}
+
 function App(): React.JSX.Element {
+  const [route, setRoute] = useState<'notes' | 'pdf'>('notes')
   const [notes, setNotes] = useState<NoteRow[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [openSettings, setOpenSettings] = useState(false)
@@ -23,170 +33,28 @@ function App(): React.JSX.Element {
   const [semanticBase, setSemanticBase] = useState<any[]>([])
   const [rerankBase, setRerankBase] = useState<any[]>([])
   const [hybridBase, setHybridBase] = useState<any[]>([])
-  const [epubFile, setEpubFile] = useState<File | null>(null)
-  const [epubUrl, setEpubUrl] = useState<string | null>(null)
-  const [epubBuffer, setEpubBuffer] = useState<ArrayBuffer | null>(null)
-  const [epubView, setEpubView] = useState<'library' | 'reader'>('library')
-  const [library, setLibrary] = useState<LibraryBook[]>([])
-  const [epubRelated, setEpubRelated] = useState<any[]>([])
+  // EPUB/PDF states removed
   const fuzzyTimerRef = useRef<number | null>(null)
   const lastQueryRef = useRef<string>('')
   const [isSearchMode, setIsSearchMode] = useState(false)
   const [totalCount, setTotalCount] = useState<number>(0)
   const [selectedNoteIds, setSelectedNoteIds] = useState<number[]>([])
   const pageSize = 200
-  const [route, setRoute] = useState<'notes' | 'epub' | 'pdf'>('notes')
+  // Single route: notes browser
   const [keywordGrouping, setKeywordGrouping] = useState<boolean>(false)
-  const [groups, setGroups] = useState<Array<{ keyword: string; notes: any[]; kcos?: number; gbm25?: number }>>([])
   const [currentQuery, setCurrentQuery] = useState<string>('')
-  useEffect(() => { (window as any).__route = route }, [route])
-  const pdfFileRef = useRef<HTMLInputElement | null>(null)
+  // No alternate routes
+  const [openTags, setOpenTags] = useState<boolean>(false)
+  const [currentTagPrefix, setCurrentTagPrefix] = useState<string>('')
 
-  // Helper to fetch the current displayed notes list
-  const resortedNotesCurrent = () => (notes || []).slice()
-
-  // Recompute keyword groups from current notes using preload helpers
-  const recomputeGroups = async (current: any[]) => {
-    try {
-      const ids = current.map((n: any) => n.note_id)
-      if (ids.length === 0) { setGroups([]); return }
-      const per = (window as any).api?.extractKeywordsForNotes?.(ids, 6, 500) || []
-      const keyFor = (s: string) => String(s || '').toLowerCase()
-      // Collect unique candidate keywords across all notes (original casing preserved via first occurrence)
-      const displayFor = new Map<string, string>()
-      const uniqTerms: string[] = []
-      for (const row of per) {
-        const kws = Array.isArray(row?.keywords) ? row.keywords : []
-        for (const k of kws) {
-          const lk = keyFor(k)
-          if (!displayFor.has(lk)) { displayFor.set(lk, k); uniqTerms.push(k) }
-        }
-      }
-      // Cap to top 24 to keep it responsive
-      const candTerms = uniqTerms.slice(0, 24)
-      // Build 2- and 3-term combos from the first few terms to bound complexity
-      const seed = uniqTerms.slice(0, Math.min(6, uniqTerms.length))
-      const combos: Array<{ label: string; terms: string[] }> = []
-      for (let i = 0; i < seed.length; i++) {
-        for (let j = i + 1; j < seed.length; j++) {
-          combos.push({ label: `${seed[i]} + ${seed[j]}`, terms: [seed[i], seed[j]] })
-          for (let k = j + 1; k < seed.length; k++) {
-            combos.push({ label: `${seed[i]} + ${seed[j]} + ${seed[k]}`, terms: [seed[i], seed[j], seed[k]] })
-          }
-        }
-      }
-      // Assign each note to the keyword with highest cosine similarity and collect full cosine matrix
-      const bestForNote = new Map<number, { term: string; cos: number }>()
-      const cosMatrix = new Map<string, Map<number, number>>()
-      for (const term of candTerms) {
-        const cosArr = await (window as any).api?.embedCosForTermAgainstNotes?.(term, ids)
-        const byId: Map<number, number> = new Map<number, number>((cosArr || []).map((r: any) => [Number(r.note_id), Number(r.cos) || -1]))
-        cosMatrix.set(keyFor(term), byId)
-        for (const id of ids) {
-          const c = byId.get(id) ?? -1
-          const cur = bestForNote.get(id)
-          if (!cur || c > cur.cos) bestForNote.set(id, { term, cos: c })
-        }
-      }
-      // Evaluate combos (mean vector of member keywords)
-      for (const combo of combos) {
-        const cosArr = await (window as any).api?.embedCosForTermsComboAgainstNotes?.(combo.terms, ids)
-        const byId: Map<number, number> = new Map<number, number>((cosArr || []).map((r: any) => [Number(r.note_id), Number(r.cos) || -1]))
-        cosMatrix.set(keyFor(combo.label), byId)
-        for (const id of ids) {
-          const c = byId.get(id) ?? -1
-          const cur = bestForNote.get(id)
-          if (!cur || c > cur.cos) bestForNote.set(id, { term: combo.label, cos: c })
-        }
-      }
-      // Overlap selection thresholds
-      const MIN_COS = 0.4
-      const DELTA = 0.05
-      const RATIO = 0.9
-      const overlapsByNote = new Map<number, Array<{ keyword: string; cos: number }>>()
-      for (const id of ids) {
-        const best = bestForNote.get(id)
-        const list: Array<{ keyword: string; cos: number }> = []
-        if (best) {
-          const bestCos = best.cos
-          for (const t of candTerms) {
-            const lk = keyFor(t)
-            const c = cosMatrix.get(lk)?.get(id) ?? -1
-            if (lk === keyFor(best.term)) continue
-            if (c >= MIN_COS && (bestCos - c <= DELTA || c >= RATIO * bestCos)) {
-              list.push({ keyword: displayFor.get(lk) || t, cos: c })
-            }
-          }
-          // Include combos for overlap display
-          for (const combo of combos) {
-            const lk = keyFor(combo.label)
-            const c = cosMatrix.get(lk)?.get(id) ?? -1
-            if (lk === keyFor(best.term)) continue
-            if (c >= MIN_COS && (bestCos - c <= DELTA || c >= RATIO * bestCos)) {
-              list.push({ keyword: combo.label, cos: c })
-            }
-          }
-          list.sort((a, b) => b.cos - a.cos)
-        }
-        overlapsByNote.set(id, list.slice(0, 2))
-      }
-
-      // Build groups from primary assignment
-      const groupsMap = new Map<string, any[]>()
-      for (const n of current) {
-        const pick = bestForNote.get(n.note_id)
-        const key = pick ? keyFor(pick.term) : keyFor((per.find((r: any) => r.note_id === n.note_id)?.keywords || ['misc'])[0])
-        if (!groupsMap.has(key)) groupsMap.set(key, [])
-        const gcos = cosMatrix.get(key)?.get(n.note_id) ?? -1
-        const overlaps = overlapsByNote.get(n.note_id) || []
-        groupsMap.get(key)!.push({ ...(n as any), __gcos: gcos, __overlaps: overlaps })
-      }
-
-      // Sort groups by semantic similarity (cosine) between keyword and the query; fallback to BM25 when no embeddings
-      const grp = Array.from(groupsMap.entries()).map(([lkey, gnotes]) => ({ keyword: displayFor.get(lkey) || lkey, lkey, notes: gnotes }))
-      const cosList = await (window as any).api?.cosineForTerms?.(grp.map((g) => g.keyword), currentQuery)
-      if (Array.isArray(cosList) && cosList.length) {
-        const cosBy = new Map(cosList.map((c: any) => [String(c.term).toLowerCase(), Number(c.cos) || -1]))
-        // Compute BM25 per group (min across its notes) vs current query terms for sorting and display
-        const qTerms = ((window as any).api?.extractQueryKeywords?.(currentQuery) || []) as string[]
-        const withScores = grp.map((g) => {
-          let gbm25 = Infinity
-          if (Array.isArray(qTerms) && qTerms.length > 0) {
-            const idsG = g.notes.map((n: any) => n.note_id)
-            const scores = (window as any).api?.bm25ForNotesByTerms?.(qTerms, idsG) || []
-            for (const r of scores) { gbm25 = Math.min(gbm25, Number(r?.bm25 ?? Infinity)) }
-          }
-          return { g, kcos: (cosBy.get(g.keyword.toLowerCase()) ?? -1), gbm25 }
-        })
-        // Sort by BM25 ascending; tie-breaker by cosine desc
-        withScores.sort((a, b) => (a.gbm25 - b.gbm25) || ((b.kcos ?? -1) - (a.kcos ?? -1)))
-        setGroups(withScores.map((x) => ({ keyword: x.g.keyword, notes: x.g.notes, kcos: x.kcos, gbm25: Number.isFinite(x.gbm25) ? x.gbm25 : undefined })))
-      } else {
-        // Fallback: min BM25 relative to the overall query terms (lowest first)
-        const qTerms = ((window as any).api?.extractQueryKeywords?.(currentQuery) || []) as string[]
-        if (Array.isArray(qTerms) && qTerms.length > 0) {
-          const byMinBm25 = grp.map((g) => {
-            const ids = g.notes.map((n: any) => n.note_id)
-            const scores = (window as any).api?.bm25ForNotesByTerms?.(qTerms, ids) || []
-            const min = scores.reduce((m: number, r: any) => Math.min(m, Number(r?.bm25 ?? Infinity)), Infinity)
-            return { g, min }
-          })
-          byMinBm25.sort((a: any, b: any) => a.min - b.min)
-          setGroups(byMinBm25.map((x: any) => ({ keyword: x.g.keyword, notes: x.g.notes, gbm25: Number.isFinite(x.min) ? x.min : undefined })))
-        } else {
-          setGroups(grp.map(({ keyword, notes }) => ({ keyword, notes })))
-        }
-      }
-    } catch {
-      setGroups([])
-    }
+  // Toggle handler: pass grouping flag down; NoteList computes groups
+  const onToggleKeywordGroupingClick = () => {
+    setKeywordGrouping((prev) => {
+      return !prev
+    })
   }
 
-  useEffect(() => {
-    function openPdf() { setRoute('pdf') }
-    window.addEventListener('open-pdf-reader', openPdf)
-    return () => window.removeEventListener('open-pdf-reader', openPdf)
-  }, [])
+  // No PDF reader route/events
 
   // Track current query from Header (simple global handoff)
   useEffect(() => {
@@ -196,11 +64,7 @@ function App(): React.JSX.Element {
     return () => window.clearInterval(id)
   }, [])
 
-  // Recompute groups when toggled on, when notes change, or when query changes
-  useEffect(() => {
-    if (keywordGrouping) { void recomputeGroups(notes as any) }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keywordGrouping, notes, currentQuery])
+  // No recompute; handled inside NoteList using currentQuery and visible notes
 
   // When adjusting threshold, filter current results for semantic, rerank, and hybrid modes
   useEffect(() => {
@@ -233,27 +97,7 @@ function App(): React.JSX.Element {
     }
   }, [cosThreshold, mode, semanticBase, rerankBase, hybridBase])
 
-  // Load EPUB library from settings on mount
-  useEffect(() => {
-    try {
-      const raw = (window as any).api?.getSetting?.('epub_library')
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed)) setLibrary(parsed as LibraryBook[])
-      }
-    } catch {
-      // ignore
-    }
-  }, [])
-
-  // Persist library when it changes
-  useEffect(() => {
-    try {
-      ;(window as any).api?.setSetting?.('epub_library', JSON.stringify(library))
-    } catch {
-      // ignore
-    }
-  }, [library])
+  // EPUB library removed
 
   useEffect(() => {
     try {
@@ -321,13 +165,42 @@ function App(): React.JSX.Element {
     }
   }
 
-  const selected = useMemo(() => {
-    try {
-      return selectedId ? window.api?.getNoteDetails?.(selectedId) ?? null : null
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('Failed to load note details:', err)
-      return null
+  const [selectedDetails, setSelectedDetails] = useState<any>(null)
+  useEffect(() => {
+    let canceled = false
+    let rafId: any = null
+    let timer: any = null
+    try { if (localStorage.getItem('debug.perf') === '1') { performance.mark('sel_effect_start'); console.time('details_load_total') } } catch {}
+    const run = () => {
+      try {
+        try { if (localStorage.getItem('debug.perf') === '1') console.time('details_getNoteDetails_sync') } catch {}
+        const d = selectedId ? window.api?.getNoteDetails?.(selectedId) ?? null : null
+        try { if (localStorage.getItem('debug.perf') === '1') console.timeEnd('details_getNoteDetails_sync') } catch {}
+        if (!canceled) setSelectedDetails(d)
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('Failed to load note details:', err)
+        if (!canceled) setSelectedDetails(null)
+      }
+    }
+    if (selectedId) {
+      try {
+        if (typeof window.requestAnimationFrame === 'function') {
+          rafId = window.requestAnimationFrame(() => run())
+        } else {
+          timer = window.setTimeout(run, 0)
+        }
+      } catch {
+        timer = window.setTimeout(run, 0)
+      }
+    } else {
+      setSelectedDetails(null)
+    }
+    return () => {
+      try { if (localStorage.getItem('debug.perf') === '1') console.timeEnd('details_load_total') } catch {}
+      canceled = true
+      if (rafId) window.cancelAnimationFrame(rafId)
+      if (timer) window.clearTimeout(timer)
     }
   }, [selectedId])
 
@@ -398,96 +271,6 @@ function App(): React.JSX.Element {
         mode={mode}
         cosThreshold={cosThreshold}
         onChangeCosThreshold={setCosThreshold}
-        readerActive={route !== 'notes'}
-        route={route}
-        onEnterReader={() => setRoute('epub')}
-        onExitReader={() => setRoute('notes')}
-        onOpenEpub={route==='epub' ? async (file) => {
-          // Add to library and show library view; extract cover and persist
-          try {
-            const filePath = (file as any).path as string | undefined
-            const url = filePath ? `file://${filePath}` : URL.createObjectURL(file)
-            const title = file.name.replace(/\.epub$/i, '')
-            const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-
-            async function blobToDataUrl(blob: Blob): Promise<string> {
-              return await new Promise<string>((resolve) => {
-                const reader = new FileReader()
-                reader.onload = () => resolve(String(reader.result || ''))
-                reader.readAsDataURL(blob)
-              })
-            }
-
-            async function extractCover(): Promise<string | null> {
-              try {
-                const ab = await file.arrayBuffer()
-                const book = ePub(ab)
-                try { await (book as any).opened } catch {}
-                // Strategy 1: coverUrl()
-                try {
-                  if (typeof (book as any).coverUrl === 'function') {
-                    const c = await (book as any).coverUrl()
-                    if (c) {
-                      const resp = await fetch(c)
-                      if (resp.ok) {
-                        const blob = await resp.blob()
-                        return await blobToDataUrl(blob)
-                      }
-                    }
-                  }
-                } catch {}
-                // Strategy 2: manifest metadata
-                try {
-                  const pkg = (book as any).packaging || {}
-                  const manifest = pkg.manifest || {}
-                  const meta = pkg.metadata || {}
-                  let href: string | null = null
-                  if (meta.cover && manifest[meta.cover]?.href) href = manifest[meta.cover].href
-                  if (!href) {
-                    for (const id in manifest) {
-                      const item = manifest[id]
-                      const props = String(item?.properties || '')
-                      const t = String(item?.type || '')
-                      const h = String(item?.href || '')
-                      if ((/cover-image/i.test(props) || /cover/i.test(id) || /cover/i.test(h)) && t.startsWith('image/')) {
-                        href = h
-                        break
-                      }
-                    }
-                  }
-                  if (href) {
-                    const blob = await (book as any).archive?.getBlob?.(href)
-                    if (blob) return await blobToDataUrl(blob)
-                  }
-                } catch {}
-                // Strategy 3: first image resource
-                try {
-                  const resources = (book as any).resources?.resources || {}
-                  for (const key of Object.keys(resources)) {
-                    const r = resources[key]
-                    const t = String(r?.type || '')
-                    if (t.startsWith('image/')) {
-                      const blob = await (book as any).archive?.getBlob?.(r.href || key)
-                      if (blob) return await blobToDataUrl(blob)
-                    }
-                  }
-                } catch {}
-              } catch {}
-              return null
-            }
-
-            const coverDataUrl = await extractCover()
-
-            const entry: LibraryBook = { id, title, path: url, coverDataUrl, progressPct: 0, lastCfi: null }
-            setLibrary((prev) => prev.concat([entry]))
-            setEpubFile(null)
-            setEpubUrl(null)
-            setRoute('epub')
-            setEpubView('library')
-          } catch {
-            // ignore
-          }
-        } : undefined}
         onEmbedSearch={async (q) => {
           try {
             setSearching(true)
@@ -495,15 +278,41 @@ function App(): React.JSX.Element {
             // Start with no filtering so raw embedding results are visible
             setCosThreshold(0)
             const queryVal = q || (document.querySelector('input[placeholder=\"Search notes...\"]') as HTMLInputElement)?.value || ''
+            
+            // Check if API key is configured
+            const apiKey = window.api?.getSetting?.('deepinfra_api_key') || ''
+            if (!apiKey) {
+              // eslint-disable-next-line no-console
+              console.warn('DeepInfra API key not configured. Please set it in Settings.')
+              // Show user-friendly message by setting empty results
+              setSemanticBase([])
+              setNotes([])
+              setSelectedId(null)
+              return
+            }
+            
             const results = await window.api?.embedSearch?.(queryVal, 200)
             if (Array.isArray(results)) {
               setSemanticBase(results as any)
               setNotes(results as any)
               setSelectedId(results.length ? (results as any)[0].note_id : null)
+              
+              // Log results for debugging
+              // eslint-disable-next-line no-console
+              console.log(`Semantic search returned ${results.length} results for query: "${queryVal}"`)
+            } else {
+              // eslint-disable-next-line no-console
+              console.warn('Semantic search returned invalid results:', results)
+              setSemanticBase([])
+              setNotes([])
+              setSelectedId(null)
             }
           } catch (err) {
             // eslint-disable-next-line no-console
             console.error('Embed search failed:', err)
+            setSemanticBase([])
+            setNotes([])
+            setSelectedId(null)
           } finally {
             setSearching(false)
           }
@@ -565,7 +374,7 @@ function App(): React.JSX.Element {
               return
             }
             setIsSearchMode(true)
-            const rows = window.api?.searchNotes?.(trimmed, 2000, 0) ?? []
+            const rows = window.api?.searchNotes?.(trimmed, 250, 0) ?? []
             setNotes(rows)
             setSelectedId(rows.length ? rows[0].note_id : null)
             // If no exact results, schedule an automatic fuzzy search with a larger debounce
@@ -576,7 +385,7 @@ function App(): React.JSX.Element {
                 try {
                   setSearching(true)
                   setMode('fuzzy')
-                  const frows = window.api?.fuzzySearch?.(lastQueryRef.current, 2000) ?? []
+                  const frows = window.api?.fuzzySearch?.(lastQueryRef.current, 250) ?? []
                   // Only apply if query hasn't changed in the interim
                   if (lastQueryRef.current === q) {
                     setNotes(frows)
@@ -649,7 +458,7 @@ function App(): React.JSX.Element {
         onToggleGroupByBadge={onToggleGroupByBadge}
         onGroupSelectBadge={groupSelectBadge}
         onGroupUnselectBadge={groupUnselectBadge}
-        onToggleKeywordGrouping={() => setKeywordGrouping((v) => !v)}
+        onToggleKeywordGrouping={onToggleKeywordGroupingClick}
         keywordGrouping={keywordGrouping}
         onBm25FromTerms={(terms) => {
           try {
@@ -701,100 +510,83 @@ function App(): React.JSX.Element {
             setSearching(false)
           }
         }}
+        onOpenTags={() => setOpenTags(true)}
+        onOpenPdf={() => setRoute('pdf')}
       />
-      {/* Hidden PDF input when on PDF route (if needed later) */}
-      {route==='pdf' && (
-        <input ref={pdfFileRef} type="file" accept="application/pdf" className="hidden" />
-      )}
-      {/* View switcher */}
       {route === 'pdf' ? (
-        <div className="px-4 pb-2 h-full min-h-0"><PDFReader /></div>
-      ) : route === 'epub' ? (
-        // previous epub block
-        (epubView === 'library' || (!epubFile && !epubUrl)) ? (
-          <div className="h-full min-h-0 px-4 pb-2">
-            <div className="rounded-lg border bg-card overflow-hidden h-full">
-              <EpubLibrary
-                books={library}
-                onOpen={async (b) => {
+        <div className="h-full min-h-0">
+          <PdfPage onBack={() => setRoute('notes')} />
+        </div>
+      ) : (
+        <>
+          {/* Notes browser */}
+          <div className="grid grid-cols-[2fr_1fr] h-full min-h-0 px-4 pb-2 gap-2 mt-2">
+            <div className="rounded-lg border bg-card overflow-hidden">
+              <NoteList
+                notes={notes}
+                selectedId={selectedId}
+                onSelect={useCallback((noteId: number) => {
+                  try { if (localStorage.getItem('debug.perf') === '1') performance.mark('sel_click') } catch {}
+                  setSelectedId((prev) => (prev === noteId ? prev : noteId))
+                }, [])}
+                onEndReached={loadMoreDefault}
+                mode={mode}
+                selectedIds={selectedNoteIds}
+                onToggleSelect={useCallback((noteId: number, checked: boolean) => {
+                  setSelectedNoteIds((prev) => {
+                    const set = new Set(prev)
+                    if (checked) set.add(noteId)
+                    else set.delete(noteId)
+                    return Array.from(set)
+                  })
+                }, [])}
+                aiGrouping={keywordGrouping}
+                currentQuery={currentQuery}
+                currentTagPrefix={currentTagPrefix}
+                onTagPrefixChange={(prefix) => {
+                  setCurrentTagPrefix(prefix)
                   try {
-                    setEpubFile(null)
-                    setEpubUrl(b.path)
-                    // Read the file through preload to avoid file:// CSP/permissions
-                    const ab = await (window as any).api?.readFileBinary?.(b.path)
-                    if (ab) setEpubBuffer(ab as ArrayBuffer)
+                    if (!prefix) {
+                      const initial = (window as any).api?.listNotes?.(pageSize, 0) ?? []
+                      setNotes(initial)
+                      setSelectedId(initial.length ? initial[0].note_id : null)
+                    } else {
+                      const arr = (window as any).api?.getNotesByTagPrefix?.(prefix, 2000, 0) ?? []
+                      setNotes(arr)
+                      setSelectedId(arr.length ? arr[0].note_id : null)
+                    }
                   } catch {}
-                  setEpubView('reader')
-                }}
-                onDelete={(b) => {
-                  setLibrary((prev) => prev.filter((x) => x.id !== b.id))
                 }}
               />
             </div>
+            <div className="rounded-lg border bg-card overflow-hidden">
+              <NoteDetailsView data={selectedDetails} />
+            </div>
           </div>
-        ) : (
-        <div className="grid grid-cols-[3fr_2fr] h-full min-h-0 px-4 pb-2 gap-2">
-          <div className="rounded-lg border bg-card overflow-hidden">
-            {epubFile || epubUrl || epubBuffer ? <EpubViewer file={epubFile || undefined} url={epubUrl || undefined} buffer={epubBuffer || undefined as any} onSemanticFromSelection={async (text) => {
+          <SettingsSheet open={openSettings} onClose={() => setOpenSettings(false)} />
+          <TagManager
+            open={openTags}
+            onClose={() => setOpenTags(false)}
+            onSelectPrefix={(prefix) => {
+              setOpenTags(false)
+              setCurrentTagPrefix(prefix)
               try {
-                setSemanticRunning(true)
-                const reranked = await (window as any).api?.semanticRerankSmall?.(text)
-                if (Array.isArray(reranked)) {
-                  setEpubRelated(reranked as any)
+                if (!prefix) {
+                  const initial = (window as any).api?.listNotes?.(pageSize, 0) ?? []
+                  setNotes(initial)
+                  setSelectedId(initial.length ? initial[0].note_id : null)
+                } else {
+                  const arr = (window as any).api?.getNotesByTagPrefix?.(prefix, 2000, 0) ?? []
+                  setNotes(arr)
+                  setSelectedId(arr.length ? arr[0].note_id : null)
                 }
-              } catch (err) {
-                // eslint-disable-next-line no-console
-                console.error('Semantic from selection failed:', err)
-              } finally {
-                setSemanticRunning(false)
-              }
-            }} onVisibleText={async (visible) => {
-              try {
-                // Query related notes for current visible section text
-                const reranked = await (window as any).api?.semanticRerankSmall?.(visible)
-                if (Array.isArray(reranked)) {
-                  setEpubRelated(reranked as any)
-                }
-              } catch (err) {
-                // eslint-disable-next-line no-console
-                console.error('Related notes update failed:', err)
-              }
-            }} /> : <div className="p-4 text-sm text-muted-foreground">Open an EPUB to start reading.</div>}
-          </div>
-          <div className="rounded-lg border bg-card overflow-hidden">
-            <EpubNotesPanel items={epubRelated as any} onSelect={setSelectedId} />
-          </div>
-        </div>
-        )
-      ) : (
-        // Notes browser
-        <div className="grid grid-cols-[2fr_1fr] h-full min-h-0 px-4 pb-2 gap-2">
-          <div className="rounded-lg border bg-card overflow-hidden">
-            <NoteList
-              notes={notes}
-              selectedId={selectedId}
-              onSelect={setSelectedId}
-              onEndReached={loadMoreDefault}
-              mode={mode}
-              selectedIds={selectedNoteIds}
-              onToggleSelect={(noteId, checked) => {
-                setSelectedNoteIds((prev) => {
-                  const set = new Set(prev)
-                  if (checked) set.add(noteId)
-                  else set.delete(noteId)
-                  return Array.from(set)
-                })
-              }}
-              groups={keywordGrouping ? groups : undefined}
-            />
-          </div>
-          <div className="rounded-lg border bg-card overflow-hidden">
-        <NoteDetails data={selected} />
-      </div>
-        </div>
+                setGroups([])
+              } catch {}
+            }}
+          />
+        </>
       )}
-      <SettingsSheet open={openSettings} onClose={() => setOpenSettings(false)} />
-      <FooterBar left={<span>Ready</span>} right={<span>{route === 'notes' ? (isSearchMode ? 'Search mode' : 'Browse mode') : route === 'epub' ? 'EPUB reader' : 'PDF reader'}</span>} />
+      <FooterBar left={<span>{route === 'pdf' ? 'PDF' : 'Ready'}</span>} right={<span>{isSearchMode ? 'Search mode' : 'Browse mode'}</span>} />
     </div>
   )
 }

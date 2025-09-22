@@ -5,6 +5,8 @@ import { NoteCard, type NoteCardMode, type NoteListItem } from '@/components/not
 import { NoteGroup } from '@/components/tags/NoteGroup'
 import type { TagGroup as TagGroupType } from '@/components/tags/NoteGroup'
 import type { TagGroup } from '@/components/tags/NoteGroup'
+import { ConceptMapPanel } from '@/components/topics/ConceptMapPanel'
+import type { ConceptScope } from '@/types/concept'
 // Memoized wrapper to prevent non-selected rows from re-rendering on selection changes
 const MemoNoteCard = memo(NoteCard, (prev, next) => {
   // Re-render only if the specific note row selection or mode or note reference changes
@@ -21,7 +23,7 @@ type NoteListProps = {
   mode?: NoteCardMode
   selectedIds?: number[]
   onToggleSelect?: (noteId: number, selected: boolean) => void
-  aiGrouping?: boolean
+  groupMode?: 'none' | 'ai' | 'concept'
   currentQuery?: string
   currentTagPrefix?: string
   onTagPrefixChange?: (prefix: string) => void
@@ -34,7 +36,7 @@ type NoteListProps = {
 // Render preview with cloze inner text colorized, no HTML/cloze syntax visible, media/audio abbreviated
 // (removed) previous JSX-based preview renderer
 
-export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'default', selectedIds = [], onToggleSelect, aiGrouping = false, currentQuery = '', currentTagPrefix = '', onTagPrefixChange }: NoteListProps): React.JSX.Element {
+export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'default', selectedIds = [], onToggleSelect, groupMode = 'none', currentQuery = '', currentTagPrefix = '', onTagPrefixChange }: NoteListProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const outerRef = useRef<HTMLDivElement | null>(null)
   const [height, setHeight] = useState<number>(400)
@@ -81,7 +83,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
   
   // Calculate total notes for AI groups using unique note IDs (avoid double-counting across groups)
   const totalNotesAi = useMemo(() => {
-    if (!aiGrouping || aiGroups.length === 0) return 0
+    if (groupMode !== 'ai' || aiGroups.length === 0) return 0
     const ids = new Set<number>()
     const add = (g: TagGroup): void => {
       if (Array.isArray(g.notes)) g.notes.forEach((n: any) => ids.add(Number(n?.note_id)))
@@ -89,7 +91,9 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
     }
     aiGroups.forEach(add)
     return ids.size
-  }, [aiGrouping, aiGroups])
+  }, [groupMode, aiGroups])
+
+  const conceptNoteIds = useMemo(() => notes.map((n) => n.note_id), [notes])
 
   // Flatten groups into a single virtualized row list
   type GroupRowHeader = { type: 'header'; key: string; depth: number; label: string; count: number; kcos?: number; gbm25?: number }
@@ -209,7 +213,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
 
   // Build AI groups from current visible notes when enabled
   useEffect(() => {
-    if (!aiGrouping) { setAiGroups([]); return }
+    if (groupMode !== 'ai') { setAiGroups([]); return }
     let alive = true
     ;(async () => {
       try {
@@ -270,7 +274,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
       }
     })()
     return () => { alive = false }
-  }, [aiGrouping, notes, currentQuery])
+  }, [groupMode, notes, currentQuery])
 
   const ITEM_SIZE = 36
   const MAX_NOTES_PER_GROUP = 100 // Performance limit for non-virtualized rendering
@@ -466,7 +470,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
               {totalCount > 0 && (
                 <span className="text-xs font-semibold bg-white/20 rounded-full px-2 py-0.5 flex-shrink-0 ml-2">
                   {totalCount}
-                </span>
+      </span>
               )}
             </div>
           </button>
@@ -643,8 +647,8 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
   }
 
   // AI grouping view (reuse Tag NoteGroup UI). No layout from AI code; only labels and note sets.
-  if (aiGrouping && aiGroups.length > 0) {
-    return (
+  if (groupMode === 'ai' && aiGroups.length > 0) {
+  return (
       <div ref={containerRef} className="min-h-0 h-full overflow-y-auto">
         <div className="sticky top-0 z-20 bg-background/80 backdrop-blur border-b px-3 py-2 flex items-center justify-between w-full">
           <div className="flex items-center gap-2">
@@ -659,7 +663,7 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
               <ChevronDown className="w-3 h-3 inline mr-1" />
               Expand All
             </button>
-            <button
+        <button
               className="text-xs px-3 py-1 rounded-md border bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors"
               onClick={() => { setDefaultExpanded(false); setExpandVersion((v) => v + 1) }}
             >
@@ -684,6 +688,21 @@ export function NoteList({ notes, selectedId, onSelect, onEndReached, mode = 'de
             />
           ))}
         </div>
+      </div>
+    )
+  }
+
+  if (groupMode === 'concept') {
+    const isGlobal = !currentTagPrefix && !currentQuery
+    const conceptScope: ConceptScope = currentTagPrefix
+      ? { type: 'tag', tag: currentTagPrefix }
+      : currentQuery
+        ? { type: 'query', query: currentQuery, limit: notes.length }
+        : { type: 'global' }
+    const noteIdPayload = isGlobal ? undefined : conceptNoteIds
+    return (
+      <div ref={containerRef} className="min-h-0 h-full overflow-y-auto px-3 py-3">
+        <ConceptMapPanel scope={conceptScope} noteIds={noteIdPayload} query={currentQuery} />
       </div>
     )
   }

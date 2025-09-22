@@ -41,19 +41,13 @@ function App(): React.JSX.Element {
   const [selectedNoteIds, setSelectedNoteIds] = useState<number[]>([])
   const pageSize = 200
   // Single route: notes browser
-  const [keywordGrouping, setKeywordGrouping] = useState<boolean>(false)
+  const [groupMode, setGroupMode] = useState<'none' | 'ai' | 'concept'>('none')
   const [currentQuery, setCurrentQuery] = useState<string>('')
   // No alternate routes
   const [openTags, setOpenTags] = useState<boolean>(false)
   const [currentTagPrefix, setCurrentTagPrefix] = useState<string>('')
 
   // Toggle handler: pass grouping flag down; NoteList computes groups
-  const onToggleKeywordGroupingClick = () => {
-    setKeywordGrouping((prev) => {
-      return !prev
-    })
-  }
-
   // No PDF reader route/events
 
   // Track current query from Header (simple global handoff)
@@ -458,8 +452,10 @@ function App(): React.JSX.Element {
         onToggleGroupByBadge={onToggleGroupByBadge}
         onGroupSelectBadge={groupSelectBadge}
         onGroupUnselectBadge={groupUnselectBadge}
-        onToggleKeywordGrouping={onToggleKeywordGroupingClick}
-        keywordGrouping={keywordGrouping}
+        onChangeGroupMode={(mode) => setGroupMode(mode)}
+        groupMode={groupMode}
+        onToggleConceptMap={() => setGroupMode((prev) => (prev === 'concept' ? 'none' : 'concept'))}
+        conceptMapActive={groupMode === 'concept'}
         onBm25FromTerms={(terms) => {
           try {
             setSearching(true)
@@ -497,10 +493,6 @@ function App(): React.JSX.Element {
                   })
                 setNotes(resorted)
                 setSelectedId(resorted.length ? resorted[0].note_id : null)
-              }
-              // If grouping is active, recompute groups after reorder
-              if (keywordGrouping) {
-                recomputeGroups(resortedNotesCurrent())
               }
             }
           } catch (err) {
@@ -540,7 +532,7 @@ function App(): React.JSX.Element {
                     return Array.from(set)
                   })
                 }, [])}
-                aiGrouping={keywordGrouping}
+                groupMode={groupMode}
                 currentQuery={currentQuery}
                 currentTagPrefix={currentTagPrefix}
                 onTagPrefixChange={(prefix) => {

@@ -16,6 +16,15 @@ export function startEmbedding(rebuild?: boolean): Promise<{ pid: number }>{
           stdio: ['ignore', 'pipe', 'pipe'],
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', GEMMA_MODEL_ID: modelId, GEMMA_DTYPE: dtype, CONCURRENCY: '64', BATCH_SIZE: '8', REBUILD_ALL: rebuild ? '1' : '0' }
         })
+      } else if (backend === 'google') {
+        const scriptPath = path.resolve(process.cwd(), 'database/embed_index_google.mjs')
+        const key = getSetting('google_api_key') || process.env.GOOGLE_API_KEY || ''
+        const model = getSetting('google_embed_model') || 'gemini-embedding-001'
+        child = spawnChild(process.execPath, [scriptPath], {
+          cwd: process.cwd(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', GOOGLE_API_KEY: key, GOOGLE_EMBED_MODEL: model, CONCURRENCY: '100', BATCH_SIZE: '8', REBUILD_ALL: rebuild ? '1' : '0' }
+        })
       } else {
         const scriptPath = path.resolve(process.cwd(), 'database/embed_index.mjs')
         const key = getSetting('deepinfra_api_key') || process.env.DEEPINFRA_API_KEY || ''

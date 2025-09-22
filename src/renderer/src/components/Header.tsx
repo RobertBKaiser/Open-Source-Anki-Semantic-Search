@@ -24,12 +24,38 @@ type HeaderProps = {
   onToggleGroupByBadge?: () => void
   onGroupSelectBadge?: (badge: 0 | 1 | 2 | 3) => void
   onGroupUnselectBadge?: (badge: 0 | 1 | 2 | 3) => void
-  // AI grouping toggle
-  onToggleKeywordGrouping?: () => void
-  keywordGrouping?: boolean
+  groupMode?: 'none' | 'ai' | 'concept'
+  onChangeGroupMode?: (mode: 'none' | 'ai' | 'concept') => void
+  onToggleConceptMap?: () => void
+  conceptMapActive?: boolean
 }
 
-export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid, onUnsuspend, onOpenSettings, onOpenTags, searching = false, semanticRunning = false, selectedIds = [], mode = 'default', cosThreshold = 0, onChangeCosThreshold, badgeCounts = [], grouped = false, onToggleGroupByBadge, onGroupSelectBadge, onGroupUnselectBadge, onToggleKeywordGrouping, keywordGrouping = false, onOpenPdf }: HeaderProps & { onOpenPdf?: () => void }): React.JSX.Element {
+export function Header({
+  onSearch,
+  onFuzzy,
+  onSemantic,
+  onEmbedSearch,
+  onHybrid,
+  onUnsuspend,
+  onOpenSettings,
+  onOpenTags,
+  searching = false,
+  semanticRunning = false,
+  selectedIds = [],
+  mode = 'default',
+  cosThreshold = 0,
+  onChangeCosThreshold,
+  badgeCounts = [],
+  grouped = false,
+  onToggleGroupByBadge,
+  onGroupSelectBadge,
+  onGroupUnselectBadge,
+  groupMode = 'none',
+  onChangeGroupMode,
+  onToggleConceptMap,
+  conceptMapActive = false,
+  onOpenPdf,
+}: HeaderProps & { onOpenPdf?: () => void }): React.JSX.Element {
   const [q, setQ] = useState('')
   // No route menu
   const [activeBadges, setActiveBadges] = useState<number[]>([])
@@ -107,6 +133,14 @@ export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid,
             onClick={() => onHybrid(q)}
           >
             Hybrid
+          </Button>
+        )}
+        {onToggleConceptMap && (
+          <Button
+            className={`text-white active:translate-y-[1px] active:shadow-inner ${conceptMapActive ? 'bg-emerald-600 hover:bg-emerald-600' : 'bg-emerald-500 hover:bg-emerald-600'}`}
+            onClick={() => onToggleConceptMap?.()}
+          >
+            Concept Map
           </Button>
         )}
       {searching && (
@@ -217,14 +251,19 @@ export function Header({ onSearch, onFuzzy, onSemantic, onEmbedSearch, onHybrid,
                 })}
               </div>
             )}
-            {/* Group by AI toggle */}
-              <button
-                className="ml-2 inline-flex items-center gap-1 rounded-full px-2.5 py-1 border shadow-sm bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900/40 dark:hover:bg-zinc-800/60 transition-colors"
-                onClick={() => onToggleKeywordGrouping && onToggleKeywordGrouping()}
-                title={keywordGrouping ? 'Ungroup AI Groups' : 'Group by AI'}
-              >
-                {keywordGrouping ? 'Ungroup AI Groups' : 'Group by AI'}
-              </button>
+            {/* Grouping mode toggle */}
+            <button
+              className="ml-2 inline-flex items-center gap-1 rounded-full px-2.5 py-1 border shadow-sm bg-zinc-50 hover:bg-zinc-100 dark:bg-zinc-900/40 dark:hover:bg-zinc-800/60 transition-colors"
+              onClick={() => {
+                const next = groupMode === 'none' ? 'ai' : groupMode === 'ai' ? 'concept' : 'none'
+                onChangeGroupMode && onChangeGroupMode(next)
+              }}
+              title={groupMode === 'none' ? 'Show AI groups' : groupMode === 'ai' ? 'Show concept map' : 'Show note list'}
+            >
+              {groupMode === 'none' && 'Group: Off'}
+              {groupMode === 'ai' && 'Group: AI'}
+              {groupMode === 'concept' && 'Group: Concept Map'}
+            </button>
           </div>
         )
       })()}

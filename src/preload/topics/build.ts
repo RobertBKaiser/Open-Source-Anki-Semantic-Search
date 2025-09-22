@@ -352,38 +352,61 @@ function composeParams(
   docCount: number
 ): Record<string, unknown> {
   const clusterScale = (() => {
-    if (docCount >= 40000) return 25
-    if (docCount >= 20000) return 22
-    if (docCount >= 10000) return 18
-    if (docCount >= 5000) return 15
-    if (docCount >= 1500) return 12
-    return 8
+    if (docCount >= 40000) return 18
+    if (docCount >= 20000) return 16
+    if (docCount >= 10000) return 12
+    if (docCount >= 5000) return 9
+    if (docCount >= 1500) return 7
+    return 5
   })()
   const baseParams = {
     top_n_terms: options.topTermsPerTopic ?? 12,
     backend,
     model,
     umap: {
-      n_neighbors: Math.min(60, Math.max(10, Math.round(Math.sqrt(Math.min(docCount, 2500))) + 10)),
+      n_neighbors: Math.min(45, Math.max(8, Math.round(Math.sqrt(Math.min(docCount, 2500))) + 5)),
       n_components: 15,
-      min_dist: docCount > 10000 ? 0.01 : 0.05,
+      min_dist: docCount > 10000 ? 0.015 : 0.035,
       metric: 'cosine',
       random_state: 42,
     },
     hdbscan: {
       min_cluster_size: clusterScale,
-      min_samples: Math.max(5, Math.floor(clusterScale / 2)),
+      min_samples: Math.max(3, Math.floor(clusterScale / 3)),
       metric: 'euclidean',
       cluster_selection_method: 'eom',
       prediction_data: true,
     },
     vectorizer: {
       ngram_range: [1, 3],
-      min_df: docCount > 20000 ? 15 : docCount > 10000 ? 8 : 2,
-      max_features: docCount > 20000 ? 15000 : docCount > 10000 ? 10000 : 6000,
+      min_df: docCount > 20000 ? 10 : docCount > 10000 ? 5 : 1,
+      max_features: docCount > 20000 ? 20000 : docCount > 10000 ? 15000 : 8000,
       stop_words: null,
     },
+    min_topic_size: Math.max(4, Math.round(clusterScale * 0.8)),
   }
+
+  const hasUserRepresentationOverride = Boolean(options.params && Object.prototype.hasOwnProperty.call(options.params, 'representation'))
+  if (!hasUserRepresentationOverride) {
+    const openaiKey = (getSetting('openai_api_key') as string | undefined)?.trim() || process.env.OPENAI_API_KEY || ''
+    const llmDisableFlag = String(getSetting('concept_map_llm_refine') ?? '').trim().toLowerCase()
+    const llmDisabled = ['0', 'false', 'no', 'off'].includes(llmDisableFlag)
+    if (openaiKey && !llmDisabled) {
+      const llmModelSetting = (getSetting('concept_map_llm_model') as string | undefined)?.trim()
+      const llmModel = llmModelSetting && llmModelSetting.length > 0 ? llmModelSetting : 'gpt-5-nano'
+      const representation: Record<string, unknown> = {
+        type: 'openai',
+        api_key: openaiKey,
+        model: llmModel,
+      }
+      const promptOverride = (getSetting('concept_map_llm_prompt') as string | undefined)?.trim()
+      if (promptOverride) representation.prompt = promptOverride
+      const systemPromptOverride = (getSetting('concept_map_llm_system') as string | undefined)?.trim()
+      if (systemPromptOverride) representation.system_prompt = systemPromptOverride
+      baseParams.representation = representation
+    }
+  }
+
   return mergeParams(baseParams, options.params || {})
 }
 

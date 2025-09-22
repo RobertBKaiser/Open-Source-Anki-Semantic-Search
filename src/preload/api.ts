@@ -3,7 +3,7 @@ import { getSetting, setSetting } from './db/settings'
 import { listAllTags, getChildTags } from './db/tags'
 import { listNotes, searchNotes, getNoteDetails, countNotes, getNotesByTag, getNotesByTagPrefix } from './db/notes'
 import { getFirstFieldsForIds, getBackFieldsForIds, frontIsVisible } from './db/fields'
-import { getEmbDb, getEmbeddingProgress, migrateEmbeddingsTo4096 } from './embeddings/core'
+import { getEmbDb, getEmbeddingProgress, migrateEmbeddingsTo4096, getEmbeddingProgressAll } from './embeddings/core'
 import { getPrecomputedRelated, setPrecomputedRelated } from './embeddings/precomputed'
 import { getHnswIndex, getHnswBuildStatus, buildVectorIndexHNSW } from './embeddings/hnsw'
 import { extractQueryKeywords, extractKeywordsForNotes, extractFrontKeyIdeas, getTopKeywordsForNote } from './keywords/extract'
@@ -19,6 +19,14 @@ import { runIngest } from './jobs/ingest'
 import { groupNotesByAI } from './ai/grouping'
 import { startEmbedding, stopEmbedding } from './jobs/embedding'
 import { computeLocalEmbedding } from './embeddings/gemma'
+import {
+  buildConceptMapForNotes,
+  getConceptMapDetails,
+  listConceptMapHistory,
+  deleteConceptMapRun,
+} from './topics/service'
+import { onConceptMapProgress, getConceptMapProgress } from './topics/progress'
+import type { ConceptMapProgress } from './topics/progress'
 
 export const api = {
   // settings
@@ -41,6 +49,7 @@ export const api = {
   // embeddings/core
   getEmbDb,
   getEmbeddingProgress,
+  getEmbeddingProgressAll,
   migrateEmbeddingsTo4096,
   // precomputed/hnsw
   getPrecomputedRelated,
@@ -73,6 +82,23 @@ export const api = {
   semanticRerankSmall,
   // local embeddings
   computeLocalEmbedding,
+  // concept maps
+  buildConceptMapForNotes,
+  getConceptMapDetails,
+  listConceptMapHistory,
+  deleteConceptMapRun,
+  getConceptMapProgress,
+  subscribeConceptMapProgress: (callback: (progress: ConceptMapProgress) => void) => {
+    const handler = (progress: ConceptMapProgress) => {
+      try { callback(progress) } catch (err) { console.error('[ConceptMap] progress callback error', err) }
+    }
+    const unsubscribe = onConceptMapProgress(handler)
+    const current = getConceptMapProgress()
+    setTimeout(() => {
+      try { callback(current) } catch {}
+    }, 0)
+    return () => unsubscribe()
+  },
   // ai grouping
   groupNotesByAI,
   // anki & jobs
@@ -85,5 +111,3 @@ export const api = {
 }
 
 export type Api = typeof api
-
-

@@ -33,6 +33,7 @@ Outputs JSON with keys:
 import json
 import math
 import numbers
+import os
 import sys
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -104,6 +105,19 @@ try:
 except Exception as exc:  # noqa: BLE001
     _fail(f"bertopic import failed: {exc}")
 
+try:
+    from bertopic.representation import KeyBERTInspired, MaximalMarginalRelevance, PartOfSpeech, OpenAI
+except Exception:
+    KeyBERTInspired = None  # type: ignore[assignment]
+    MaximalMarginalRelevance = None  # type: ignore[assignment]
+    PartOfSpeech = None  # type: ignore[assignment]
+    OpenAI = None  # type: ignore[assignment]
+
+try:
+    import openai  # type: ignore[import]
+except Exception:
+    openai = None  # type: ignore[assignment]
+
 
 def read_input() -> Dict[str, Any]:
     try:
@@ -148,6 +162,10 @@ def build_topic_model(params: Dict[str, Any]) -> BERTopic:
     hdbscan_model = hdbscan.HDBSCAN(**hdbscan_conf)
     vectorizer_model = CountVectorizer(**vectorizer_conf)
 
+    representation = None
+    if isinstance(params, dict) and params.get('representation'):
+        representation = resolve_representation_model(params.get('representation'))
+
     topic_model = BERTopic(
         umap_model=umap_model,
         hdbscan_model=hdbscan_model,
@@ -157,6 +175,7 @@ def build_topic_model(params: Dict[str, Any]) -> BERTopic:
         top_n_words=params.get('top_n_terms', 10),
         nr_topics=params.get('nr_topics'),
         min_topic_size=params.get('min_topic_size', hdbscan_conf['min_cluster_size']),
+        representation_model=representation,
     )
     return topic_model
 
@@ -223,6 +242,149 @@ def load_embeddings_from_db(ids: List[int], db_path: str, backend: str, model: s
             'count': len(missing),
         }), file=sys.stderr)
     return embeddings
+
+
+def _maybe_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _maybe_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def resolve_representation_model(config: Dict[str, Any] | None) -> Any:
+    if not config or not isinstance(config, dict):
+        return None
+
+    rtype = str(config.get('type') or '').strip().lower()
+    if not rtype:
+        return None
+
+    if rtype in {'local', 'keybert', 'keybert_inspired'}:
+        if KeyBERTInspired is None:
+            print(json.dumps({'type': 'warning', 'message': 'KeyBERT representation requested but unavailable; using default c-TF-IDF labels'}), flush=True)
+            return None
+        kwargs: Dict[str, Any] = {}
+        for key in ('top_n_words', 'nr_repr_docs', 'nr_samples', 'nr_candidate_words', 'random_state'):
+            val = _maybe_int(config.get(key))
+            if val is not None:
+                kwargs[key] = val
+        return KeyBERTInspired(**kwargs)
+
+    if rtype in {'mmr', 'maximal_marginal_relevance'}:
+        if MaximalMarginalRelevance is None:
+            print(json.dumps({'type': 'warning', 'message': 'MMR representation requested but unavailable; using default c-TF-IDF labels'}), flush=True)
+            return None
+        kwargs: Dict[str, Any] = {}
+        diversity = _maybe_float(config.get('diversity'))
+        if diversity is not None:
+            kwargs['diversity'] = max(0.0, min(1.0, diversity))
+        top_n = _maybe_int(config.get('top_n_words'))
+        if top_n is not None and top_n > 0:
+            kwargs['top_n_words'] = top_n
+        return MaximalMarginalRelevance(**kwargs)
+
+    if rtype in {'pos', 'part_of_speech'}:
+        if PartOfSpeech is None:
+            print(json.dumps({'type': 'warning', 'message': 'SpaCy POS representation requested but spaCy is not installed; using default c-TF-IDF labels'}), flush=True)
+            return None
+        kwargs: Dict[str, Any] = {}
+        model_name = config.get('model')
+        if isinstance(model_name, str) and model_name.strip():
+            kwargs['model'] = model_name.strip()
+        top_n = _maybe_int(config.get('top_n_words'))
+        if top_n is not None and top_n > 0:
+            kwargs['top_n_words'] = top_n
+        if isinstance(config.get('pos_patterns'), list):
+            kwargs['pos_patterns'] = config['pos_patterns']
+        return PartOfSpeech(**kwargs)
+
+    if rtype in {'openai', 'gpt', 'chatgpt', 'llm'}:
+        if OpenAI is None or openai is None:
+            print(json.dumps({'type': 'warning', 'message': 'OpenAI representation requested but dependencies are missing; using default c-TF-IDF labels'}), flush=True)
+            return None
+
+        api_key = str(config.get('api_key') or os.environ.get('OPENAI_API_KEY') or '').strip()
+        if not api_key:
+            print(json.dumps({'type': 'warning', 'message': 'OpenAI representation requested but no API key provided; using default c-TF-IDF labels'}), flush=True)
+            return None
+
+        client_kwargs: Dict[str, Any] = {'api_key': api_key}
+        base_url = config.get('api_base') or config.get('base_url')
+        if isinstance(base_url, str) and base_url.strip():
+            client_kwargs['base_url'] = base_url.strip()
+
+        try:
+            client = openai.OpenAI(**client_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({'type': 'warning', 'message': f'Failed to initialize OpenAI client: {exc}'}), flush=True)
+            return None
+
+        kwargs: Dict[str, Any] = {}
+        model_name = config.get('model')
+        if isinstance(model_name, str) and model_name.strip():
+            kwargs['model'] = model_name.strip()
+
+        for key in ('prompt', 'system_prompt'):
+            val = config.get(key)
+            if isinstance(val, str) and val.strip():
+                kwargs[key] = val
+
+        delay = _maybe_float(config.get('delay_in_seconds'))
+        if delay is not None and delay >= 0:
+            kwargs['delay_in_seconds'] = delay
+
+        if 'exponential_backoff' in config:
+            kwargs['exponential_backoff'] = bool(config.get('exponential_backoff'))
+
+        nr_docs = _maybe_int(config.get('nr_docs'))
+        if nr_docs is not None and nr_docs > 0:
+            kwargs['nr_docs'] = nr_docs
+
+        doc_length = _maybe_int(config.get('doc_length'))
+        if doc_length is not None and doc_length > 0:
+            kwargs['doc_length'] = doc_length
+
+        diversity = _maybe_float(config.get('diversity'))
+        if diversity is not None:
+            kwargs['diversity'] = max(0.0, min(1.0, diversity))
+
+        tokenizer = config.get('tokenizer')
+        if tokenizer is not None:
+            kwargs['tokenizer'] = tokenizer
+
+        generator_kwargs = config.get('generator_kwargs')
+        if isinstance(generator_kwargs, dict):
+            # Filter out unsupported parameters that might cause API errors
+            supported_params = {'temperature', 'top_p', 'max_tokens', 'presence_penalty', 'frequency_penalty'}
+            filtered_kwargs = {k: v for k, v in generator_kwargs.items() if k in supported_params}
+            if filtered_kwargs:
+                kwargs['generator_kwargs'] = filtered_kwargs
+            # Log any filtered parameters for debugging
+            filtered_out = set(generator_kwargs.keys()) - set(filtered_kwargs.keys())
+            if filtered_out:
+                print(json.dumps({'type': 'warning', 'message': f'Filtered unsupported OpenAI parameters: {list(filtered_out)}'}), flush=True)
+
+        model = OpenAI(client=client, **kwargs)
+        try:
+            if hasattr(model, 'generator_kwargs') and isinstance(model.generator_kwargs, dict):
+                model.generator_kwargs.pop('stop', None)
+        except Exception:
+            pass
+        return model
+
+    print(json.dumps({'type': 'warning', 'message': f"Unknown representation type '{rtype}', using default c-TF-IDF labels"}), flush=True)
+    return None
 
 
 def build_topic_tree(
@@ -589,7 +751,14 @@ def main() -> None:
     try:
         topics, probs = topic_model.fit_transform(texts, embeddings=embeddings)
     except Exception as exc:  # noqa: BLE001
-        _fail(f"bertopic fit failed: {exc}")
+        exc_str = str(exc)
+        # Provide more helpful error messages for common issues
+        if 'unsupported_parameter' in exc_str.lower() and 'stop' in exc_str.lower():
+            _fail("bertopic fit failed: The OpenAI model being used doesn't support the 'stop' parameter. Try using a different model like 'gpt-3.5-turbo' or 'gpt-4' instead of the current model.")
+        elif 'invalid_request_error' in exc_str.lower():
+            _fail(f"bertopic fit failed: OpenAI API request failed. Check your API key and model configuration. Error: {exc}")
+        else:
+            _fail(f"bertopic fit failed: {exc}")
 
     print(json.dumps({'type': 'stage', 'stage': 'post_processing', 'message': 'Extracting topic representations'}), flush=True)
 

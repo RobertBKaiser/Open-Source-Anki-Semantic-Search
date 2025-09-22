@@ -25,23 +25,31 @@ const embedDb = new Database(path.resolve(__dirname, 'embeddings.db'))
 
 embedDb.pragma('journal_mode = WAL')
 embedDb.exec(`
-CREATE TABLE IF NOT EXISTS embeddings (
-  note_id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS embeddings2 (
+  note_id INTEGER NOT NULL,
+  backend TEXT NOT NULL,
+  model TEXT NOT NULL,
   dim INTEGER NOT NULL,
   vec BLOB NOT NULL,
   norm REAL NOT NULL,
   hash TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (note_id, backend, model)
 );
-CREATE TABLE IF NOT EXISTS embed_jobs (
-  note_id INTEGER PRIMARY KEY,
+CREATE INDEX IF NOT EXISTS idx_embeddings2_dim ON embeddings2(dim);
+CREATE INDEX IF NOT EXISTS idx_embeddings2_backend_model ON embeddings2(backend, model);
+CREATE TABLE IF NOT EXISTS embed_jobs2 (
+  note_id INTEGER NOT NULL,
+  backend TEXT NOT NULL,
+  model TEXT NOT NULL,
   hash TEXT NOT NULL,
   status TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   enqueued_at INTEGER NOT NULL,
   started_at INTEGER,
-  finished_at INTEGER
+  finished_at INTEGER,
+  PRIMARY KEY (note_id, backend, model)
 );
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -84,18 +92,18 @@ function enqueue(rebuild) {
              (SELECT nf.value_html FROM note_fields nf WHERE nf.note_id = n.note_id ORDER BY ord ASC LIMIT 1) AS front
       FROM notes n
     `).all()
-    const ins = embedDb.prepare(`INSERT INTO embed_jobs(note_id, hash, status, enqueued_at) VALUES(?,?, 'pending', ?) ON CONFLICT(note_id) DO UPDATE SET hash=excluded.hash, status='pending', enqueued_at=excluded.enqueued_at`)
+    const ins = embedDb.prepare(`INSERT INTO embed_jobs2(note_id, backend, model, hash, status, enqueued_at) VALUES(?, 'gemma', ?, ?, 'pending', ?) ON CONFLICT(note_id, backend, model) DO UPDATE SET hash=excluded.hash, status='pending', enqueued_at=excluded.enqueued_at`)
     const tx = embedDb.transaction((items) => {
       for (const r of items) {
         const text = normalizeHtml(r.front || '')
         const fh = modelAwareHash(crypto, text)
-        ins.run(r.note_id, fh, t)
+        ins.run(r.note_id, modelId, fh, t)
       }
     })
     tx(rows)
     return rows.length
   }
-  const embRows = embedDb.prepare(`SELECT note_id, hash FROM embeddings`).all()
+  const embRows = embedDb.prepare(`SELECT note_id, hash FROM embeddings2 WHERE backend='gemma' AND model=?`).all(modelId)
   const embById = new Map(embRows.map((r) => [r.note_id, r.hash]))
   const allCache = cacheDb.prepare(`
     SELECT n.note_id,
@@ -109,18 +117,18 @@ function enqueue(rebuild) {
     const prev = embById.get(r.note_id) || null
     if (!prev || prev !== fh) toEnqueue.push({ note_id: r.note_id, hash: fh })
   }
-  const ins = embedDb.prepare(`INSERT INTO embed_jobs(note_id, hash, status, enqueued_at) VALUES(?,?, 'pending', ?) ON CONFLICT(note_id) DO UPDATE SET hash=excluded.hash, status='pending', enqueued_at=excluded.enqueued_at`)
-  const tx = embedDb.transaction((items) => { for (const r of items) ins.run(r.note_id, r.hash, t) })
+  const ins = embedDb.prepare(`INSERT INTO embed_jobs2(note_id, backend, model, hash, status, enqueued_at) VALUES(?, 'gemma', ?, ?, 'pending', ?) ON CONFLICT(note_id, backend, model) DO UPDATE SET hash=excluded.hash, status='pending', enqueued_at=excluded.enqueued_at`)
+  const tx = embedDb.transaction((items) => { for (const r of items) ins.run(r.note_id, modelId, r.hash, t) })
   tx(toEnqueue)
   return toEnqueue.length
 }
 
 function pickBatch(limit) {
-  const rows = embedDb.prepare(`SELECT note_id, hash FROM embed_jobs WHERE status='pending' ORDER BY enqueued_at ASC LIMIT ?`).all(limit)
+  const rows = embedDb.prepare(`SELECT note_id, hash FROM embed_jobs2 WHERE backend='gemma' AND model=? AND status='pending' ORDER BY enqueued_at ASC LIMIT ?`).all(modelId, limit)
   if (!rows.length) return []
   const t = now()
-  const upd = embedDb.prepare(`UPDATE embed_jobs SET status='in_progress', started_at=? WHERE note_id=?`)
-  const tx = embedDb.transaction((items) => { for (const r of items) upd.run(t, r.note_id) })
+  const upd = embedDb.prepare(`UPDATE embed_jobs2 SET status='in_progress', started_at=? WHERE note_id=? AND backend='gemma' AND model=?`)
+  const tx = embedDb.transaction((items) => { for (const r of items) upd.run(t, r.note_id, modelId) })
   tx(rows)
   const qMarks = rows.map(() => '?').join(',')
   const fronts = cacheDb.prepare(`
@@ -155,16 +163,16 @@ async function embedBatch(items) {
   const dim = Array.isArray(mat[0]) ? mat[0].length : 0
   if (!Number.isFinite(dim) || dim <= 0) throw new Error('Invalid embedding dimension')
   const nowSec = now()
-  const upsert = embedDb.prepare(`INSERT INTO embeddings(note_id, dim, vec, norm, hash, updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(note_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec, norm=excluded.norm, hash=excluded.hash, updated_at=excluded.updated_at`)
-  const done = embedDb.prepare(`UPDATE embed_jobs SET status='done', finished_at=? WHERE note_id=?`)
+  const upsert = embedDb.prepare(`INSERT INTO embeddings2(note_id, backend, model, dim, vec, norm, hash, updated_at) VALUES(?, 'gemma', ?, ?, ?, ?, ?, ?) ON CONFLICT(note_id, backend, model) DO UPDATE SET dim=excluded.dim, vec=excluded.vec, norm=excluded.norm, hash=excluded.hash, updated_at=excluded.updated_at`)
+  const done = embedDb.prepare(`UPDATE embed_jobs2 SET status='done', finished_at=? WHERE note_id=? AND backend='gemma' AND model=?`)
   const toF32Buf = (arr) => Buffer.from(new Float32Array(arr).buffer)
   const l2 = (arr) => Math.sqrt(arr.reduce((s, x) => s + x * x, 0))
   const tx = embedDb.transaction((pairs) => {
     for (let i = 0; i < pairs.length; i++) {
       const { id, emb, hash } = pairs[i]
       const norm = l2(emb)
-      upsert.run(id, dim, toF32Buf(emb), norm, hash, nowSec)
-      done.run(nowSec, id)
+      upsert.run(id, modelId, dim, toF32Buf(emb), norm, hash, nowSec)
+      done.run(nowSec, id, modelId)
     }
   })
   const pairs = items.map((it, i) => ({ id: it.note_id, emb: mat[i], hash: it.hash }))
@@ -194,8 +202,8 @@ async function main() {
       } catch (e) {
         console.error('embed_batch_error', e)
         const t = now()
-        const pend = embedDb.prepare(`UPDATE embed_jobs SET status='pending', attempts=attempts+1, last_error=?, started_at=NULL WHERE note_id=?`)
-        const tx = embedDb.transaction(() => { for (const it of batchItems) pend.run(String(e), it.note_id) })
+        const pend = embedDb.prepare(`UPDATE embed_jobs2 SET status='pending', attempts=attempts+1, last_error=?, started_at=NULL WHERE backend='gemma' AND model=? AND note_id=?`)
+        const tx = embedDb.transaction(() => { for (const it of batchItems) pend.run(String(e), modelId, it.note_id) })
         tx()
         await new Promise(r => setTimeout(r, 1000))
       }

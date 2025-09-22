@@ -1,4 +1,5 @@
 import { getSetting } from '../db/settings'
+import { computeLocalEmbedding } from '../embeddings/gemma'
 
 export type QueryEmb = { vec: Float32Array; dims: number; model: string; ts: number }
 const QUERY_EMB_TTL_MS = 10 * 60 * 1000
@@ -30,7 +31,7 @@ export async function getQueryEmbeddingCached(q: string): Promise<Float32Array |
       const now = Date.now()
       const hit = queryEmbCache.get(key)
       if (hit && (now - hit.ts) < QUERY_EMB_TTL_MS) return hit.vec
-      const arr = await (globalThis as any).api?.computeLocalEmbedding?.([q], 'query')
+      const arr = await computeLocalEmbedding([q], 'query')
       const vec = Array.isArray(arr) && Array.isArray(arr[0]) ? new Float32Array(arr[0]) : null
       if (!vec) return null
       queryEmbCache.set(key, { vec, dims: vec.length, model: `${modelId}:${dtype}`, ts: now })

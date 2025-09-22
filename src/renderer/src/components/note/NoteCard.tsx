@@ -18,6 +18,7 @@ export type NoteListItem = {
   rerank_related?: number
   rerank_category?: 'in' | 'out' | 'related'
   score?: number
+  __cos_breakdown__?: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; cos: number }>
 }
 
 export type NoteCardMode = 'default' | 'exact' | 'fuzzy' | 'rerank' | 'semantic' | 'hybrid' | 'select'
@@ -131,8 +132,10 @@ function PreviewText({ value, ioRoot, variant }: { value: string | null; ioRoot?
   )
 }
 
-function ScoreBadges({ n, mode }: { n: NoteListItem; mode: NoteCardMode }): React.ReactNode {
+function buildScoreBadges(n: NoteListItem, mode: NoteCardMode): React.ReactNode[] {
   const jacMeta = formatJaccardPercent(n.jaccard)
+  const badges: React.ReactNode[] = []
+
   if (typeof (n as any).badge_num === 'number') {
     const bn = Number((n as any).badge_num)
     const label = bn === 0 ? 'Hit' : bn === 1 ? 'Very Related' : bn === 2 ? 'Somewhat Related' : 'Not Related'
@@ -143,72 +146,107 @@ function ScoreBadges({ n, mode }: { n: NoteListItem; mode: NoteCardMode }): Reac
         : bn === 2
           ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
           : 'bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
-    return (
-      <div className="flex items-center gap-1 ml-2">
-        <span className={`text-[11px] rounded-md px-1.5 py-0.5 ${cls}`} title="LLM badge (0 best, 3 worst)">
-          {label}
-        </span>
-      </div>
+    badges.push(
+      <span key="badge_num" className={`text-[11px] rounded-md px-1.5 py-0.5 ${cls}`} title="LLM badge (0 best, 3 worst)">
+        {label}
+      </span>
     )
+    return badges
   }
+
   if (mode === 'semantic') {
-    return (
-      <div className="flex items-center gap-1 ml-2">
-        {typeof n.rerank !== 'undefined' && Number.isFinite(Number(n.rerank)) && (
-          <span className="text-[11px] rounded-md px-1.5 py-0.5 bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300" title="Embedding similarity">
-            Similarity: {(Math.max(0, Math.min(1, Number(n.rerank))) * 100).toFixed(1)}%
-          </span>
-        )}
-      </div>
-    )
+    if (typeof n.rerank !== 'undefined' && Number.isFinite(Number(n.rerank))) {
+      const breakdown = Array.isArray((n as any).__cos_breakdown__) && (n as any).__cos_breakdown__.length > 0
+        ? (n as any).__cos_breakdown__.map((x: any) => `${x.backend}/${x.model}: ${Number(x.cos).toFixed(3)}`).join(' • ')
+        : null
+      badges.push(
+        <span
+          key="semantic"
+          className="text-[11px] rounded-md px-1.5 py-0.5 bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300"
+          title={breakdown || 'Embedding similarity'}
+        >
+          Similarity: {(Math.max(0, Math.min(1, Number(n.rerank))) * 100).toFixed(1)}%
+        </span>
+      )
+    }
+    return badges
   }
+
   if (mode === 'rerank') {
-    return (
-      <div className="flex items-center gap-1 ml-2">
-        {typeof n.rerank !== 'undefined' && (
-          <span className="text-[11px] rounded-md px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300" title="Semantic reranker relevance score">
-            Rerank: {Number(n.rerank).toFixed(3)}
-          </span>
-        )}
-      </div>
-    )
+    if (typeof n.rerank !== 'undefined') {
+      badges.push(
+        <span
+          key="rerank"
+          className="text-[11px] rounded-md px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+          title="Semantic reranker relevance score"
+        >
+          Rerank: {Number(n.rerank).toFixed(3)}
+        </span>
+      )
+    }
+    return badges
   }
+
   if (mode === 'hybrid') {
     const s = typeof (n as any).score === 'number' ? Number((n as any).score) : NaN
     const pct = Number.isFinite(s) ? Math.max(0, Math.min(100, s * 100)) : NaN
     const cos = typeof (n as any).cos === 'number' ? Number((n as any).cos) : NaN
     const bm = typeof (n as any).bm25 === 'number' ? Number((n as any).bm25) : NaN
-    const tt = `Cosine: ${Number.isFinite(cos) ? cos.toFixed(3) : '—'} • BM25: ${Number.isFinite(bm) ? bm.toFixed(2) : '—'}`
-    return (
-      <div className="flex items-center gap-1 ml-2">
-        {Number.isFinite(pct) && (
-          <span className="text-[11px] rounded-md px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300" title={tt}>
-            Similarity: {pct.toFixed(1)}%
-          </span>
-        )}
-      </div>
+    const breakdown = Array.isArray((n as any).__cos_breakdown__) && (n as any).__cos_breakdown__.length > 0
+      ? (n as any).__cos_breakdown__.map((x: any) => `${x.backend}/${x.model}: ${Number(x.cos).toFixed(3)}`).join(' • ')
+      : null
+    const tt = `${breakdown ? `${breakdown} • ` : ''}Cosine: ${Number.isFinite(cos) ? cos.toFixed(3) : '—'} • BM25: ${Number.isFinite(bm) ? bm.toFixed(2) : '—'}`
+    if (Number.isFinite(pct)) {
+      badges.push(
+        <span
+          key="hybrid"
+          className="text-[11px] rounded-md px-1.5 py-0.5 bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300"
+          title={tt}
+        >
+          Similarity: {pct.toFixed(1)}%
+        </span>
+      )
+    }
+    return badges
+  }
+
+  if (typeof n.bm25 !== 'undefined') {
+    badges.push(
+      <span
+        key="bm25"
+        className="text-[11px] rounded-md px-1.5 py-0.5 bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+        title="FTS5 bm25 (lower is better)"
+      >
+        BM25: {Number(n.bm25).toFixed(2)}
+      </span>
     )
   }
-  return (
-    <div className="flex items-center gap-1 ml-2">
-      {typeof n.bm25 !== 'undefined' && (
-        <span className="text-[11px] rounded-md px-1.5 py-0.5 bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300" title="FTS5 bm25 (lower is better)">
-          BM25: {Number(n.bm25).toFixed(2)}
-        </span>
-      )}
-      {typeof n.trigrams !== 'undefined' && (
-        <span className="text-[11px] rounded-md px-1.5 py-0.5 bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200" title="Trigram hits (higher is better)">
-          Tri: {Number(n.trigrams).toFixed(0)}
-        </span>
-      )}
-      {jacMeta && (
-        <span className={`text-[11px] rounded-md px-1.5 py-0.5 ${jacMeta.cls}`} title="Trigram Jaccard similarity (|A∩B| / |A∪B|)">
-          Jacc: {jacMeta.label}
-        </span>
-      )}
-      {/* 'where' chip removed; FTS index contains only front text */}
-    </div>
-  )
+
+  if (typeof n.trigrams !== 'undefined') {
+    badges.push(
+      <span
+        key="tri"
+        className="text-[11px] rounded-md px-1.5 py-0.5 bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+        title="Trigram hits (higher is better)"
+      >
+        Tri: {Number(n.trigrams).toFixed(0)}
+      </span>
+    )
+  }
+
+  if (jacMeta) {
+    badges.push(
+      <span
+        key="jac"
+        className={`text-[11px] rounded-md px-1.5 py-0.5 ${jacMeta.cls}`}
+        title="Trigram Jaccard similarity (|A∩B| / |A∪B|)"
+      >
+        Jacc: {jacMeta.label}
+      </span>
+    )
+  }
+
+  return badges
 }
 
 export function NoteCard({
@@ -230,55 +268,114 @@ export function NoteCard({
   ioRoot?: Element | null
   variant?: NoteCardVariant
 }): React.JSX.Element {
+  const isFull = variant === 'full'
+  const badges = buildScoreBadges(n, mode)
+
+  const chipContainerLine = badges.length > 0 ? (
+    <div className="flex items-center gap-1 ml-2">
+      {badges}
+    </div>
+  ) : null
+
+  const metaChipsFull: React.ReactNode[] = []
+  if (isFull) {
+    metaChipsFull.push(
+      <span key="id" className="text-[11px] font-mono rounded-md bg-zinc-100 px-1.5 py-[1px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+        #{n.note_id}
+      </span>
+    )
+    if (Array.isArray((n as any).__overlaps) && (n as any).__overlaps.length > 0) {
+      metaChipsFull.push(
+        <span key="overlap-label" className="text-[11px] text-muted-foreground">
+          Overlaps:
+        </span>
+      )
+      metaChipsFull.push(
+        ...(n as any).__overlaps.map((o: any, idx: number) => (
+          <span
+            key={`overlap-${idx}`}
+            className="text-[10px] rounded-md px-1 py-[1px] bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+            title={`Also matches ${o.keyword}`}
+          >
+            {o.keyword} {(o.cos * 100).toFixed(1)}%
+          </span>
+        ))
+      )
+    }
+    if (badges.length > 0) {
+      metaChipsFull.push(...badges)
+    }
+  }
+
   return (
     <button
+      type="button"
       key={n.note_id}
       onClick={() => onSelect(n.note_id)}
-      className={`relative w-full text-left px-3 py-1 truncate ${selected ? 'bg-sidebar-accent' : ''}`}
+      className={
+        isFull
+          ? `relative w-full text-left rounded-lg border px-3 py-2 transition-all duration-150 ${selected ? 'ring-2 ring-blue-400 bg-blue-50 dark:bg-blue-900/20 dark:ring-blue-400/60' : 'bg-white/90 hover:bg-white dark:bg-zinc-900/50 dark:hover:bg-zinc-900/60'}`
+          : `relative w-full text-left px-3 py-1 truncate ${selected ? 'bg-sidebar-accent' : 'hover:bg-muted/30'}`
+      }
     >
       {(typeof (n as any).badge_num === 'number' || n.rerank_category) && (
         <span
-          className="absolute left-0 top-0 bottom-0 w-[6px] rounded-r-sm"
+          className={`absolute left-0 top-0 bottom-0 ${isFull ? 'w-[4px] rounded-l-lg' : 'w-[6px] rounded-r-sm'}`}
           style={{
             backgroundColor: (() => {
               const num = (n as any).badge_num
               if (typeof num === 'number') {
                 return num === 0 ? '#10b981' : num === 1 ? '#3b82f6' : num === 2 ? '#f59e0b' : '#9ca3af'
               }
-              return n.rerank_category === 'in' ? '#ff3b30' : n.rerank_category === 'out' ? '#000000' : n.rerank_category === 'related' ? '#3b82f6' : 'transparent'
+              return n.rerank_category === 'in'
+                ? '#ff3b30'
+                : n.rerank_category === 'out'
+                  ? '#000000'
+                  : n.rerank_category === 'related'
+                    ? '#3b82f6'
+                    : 'transparent'
             })()
           }}
         />
       )}
-      <div className="flex items-center gap-2">
-        {mode === 'select' && (
-          <input
-            type="checkbox"
-            data-note-select
-            value={n.note_id}
-            className="shrink-0"
-            checked={selectedIds.includes(n.note_id)}
-            onChange={(e) => {
-              e.stopPropagation()
-              onToggleSelect && onToggleSelect(n.note_id, (e.target as HTMLInputElement).checked)
-            }}
-            onClick={(e) => e.stopPropagation()}
-          />
-        )}
-        <PreviewText value={n.first_field} ioRoot={ioRoot} variant={variant} />
-        {Array.isArray((n as any).__overlaps) && (n as any).__overlaps.length > 0 && (
-          <div className="ml-auto flex items-center gap-1">
-            {(n as any).__overlaps.map((o: any, idx: number) => (
-              <span key={idx} className="text-[10px] rounded-md px-1 py-[1px] bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300" title={`Also matches ${o.keyword}`}>
-                {o.keyword} {(o.cos * 100).toFixed(1)}%
-              </span>
-            ))}
+      <div className={isFull ? 'flex flex-col gap-2 text-left' : 'flex items-center gap-2'}>
+        <div className={isFull ? 'flex items-start gap-2' : 'flex items-center gap-2'}>
+          {mode === 'select' && (
+            <input
+              type="checkbox"
+              data-note-select
+              value={n.note_id}
+              className="shrink-0"
+              checked={selectedIds.includes(n.note_id)}
+              onChange={(e) => {
+                e.stopPropagation()
+                onToggleSelect && onToggleSelect(n.note_id, (e.target as HTMLInputElement).checked)
+              }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          )}
+          <PreviewText value={n.first_field} ioRoot={ioRoot} variant={variant} />
+          {!isFull && Array.isArray((n as any).__overlaps) && (n as any).__overlaps.length > 0 && (
+            <div className="ml-auto flex items-center gap-1">
+              {(n as any).__overlaps.map((o: any, idx: number) => (
+                <span
+                  key={idx}
+                  className="text-[10px] rounded-md px-1 py-[1px] bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
+                  title={`Also matches ${o.keyword}`}
+                >
+                  {o.keyword} {(o.cos * 100).toFixed(1)}%
+                </span>
+              ))}
+            </div>
+          )}
+          {!isFull && chipContainerLine}
+        </div>
+        {isFull && metaChipsFull.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+            {metaChipsFull}
           </div>
         )}
-        {ScoreBadges({ n, mode })}
       </div>
     </button>
   )
 }
-
-

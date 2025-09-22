@@ -4,8 +4,11 @@ import { searchBm25 } from '../../search/bm25'
 import { getDb } from '../../db/core'
 import { getBackFieldsForIds } from '../../db/fields'
 import { getQueryEmbeddingCached } from '../../utils/cache'
+import { getSetting } from '../../db/settings'
+import { getEmbDb } from '../../embeddings/core'
+import { computeLocalEmbedding } from '../../embeddings/gemma'
 
-export async function hybridSemanticModulated(query: string, limit: number = 200): Promise<Array<{ note_id: number; first_field: string | null; score: number; cos?: number; bm25?: number; matched?: number }>> {
+export async function hybridSemanticModulated(query: string, limit: number = 200): Promise<Array<{ note_id: number; first_field: string | null; score: number; cos?: number; bm25?: number; matched?: number; __cos_breakdown__?: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; cos: number }> }>> {
   const q = String(query || '').trim()
   if (!q) return []
   const terms = extractQueryKeywords(q)
@@ -102,30 +105,103 @@ export async function hybridSemanticModulated(query: string, limit: number = 200
   try {
     const needCos: number[] = []
     for (const e of byId.values()) if (typeof e.cos !== 'number') needCos.push(e.id)
-    const qv = await getQueryEmbeddingCached(q)
-    if (needCos.length > 0 && qv) {
-      let qn = 0; for (let i = 0; i < qv.length; i++) qn += qv[i] * qv[i]
-      qn = Math.sqrt(qn) || 1
-      const dbEmb = require('../../embeddings/core') as any
-      const getEmbDb = (dbEmb.getEmbDb as () => any)
-      const embDb = getEmbDb()
-      const CHUNK = 900
-      for (let i = 0; i < needCos.length; i += CHUNK) {
-        const ids = needCos.slice(i, i + CHUNK)
-        const placeholders = ids.map(() => '?').join(',')
-        const rows = embDb.prepare(`SELECT note_id, dim, vec, norm FROM embeddings WHERE note_id IN (${placeholders})`).all(...ids) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
-        for (const r of rows) {
-          if (!r.vec || r.dim !== qv.length) continue
-          const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
-          let dot = 0; for (let k = 0; k < qv.length; k++) dot += qv[k] * v[k]
-          const cos = dot / (qn * (r.norm || 1))
-          const e = byId.get(r.note_id); if (e) e.cos = cos
+    if (needCos.length > 0) {
+      const multi = (getSetting('embedding_multi_model') || '0') === '1'
+      if (!multi) {
+        const qv = await getQueryEmbeddingCached(q)
+        if (qv) {
+          let qn = 0; for (let i = 0; i < qv.length; i++) qn += qv[i] * qv[i]
+          qn = Math.sqrt(qn) || 1
+          const embDb = getEmbDb()
+          const backend = getSetting('embedding_backend') || 'deepinfra'
+          const model = backend === 'gemma' ? (getSetting('gemma_model_id') || 'onnx-community/embeddinggemma-300m-ONNX') : (backend === 'google' ? (getSetting('google_embed_model') || 'gemini-embedding-001') : (getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'))
+          const CHUNK = 900
+          for (let i = 0; i < needCos.length; i += CHUNK) {
+            const ids = needCos.slice(i, i + CHUNK)
+            const placeholders = ids.map(() => '?').join(',')
+            const rows = embDb.prepare(`SELECT note_id, dim, vec, norm FROM embeddings2 WHERE backend = ? AND model = ? AND note_id IN (${placeholders})`).all(backend, model, ...ids) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+            for (const r of rows) {
+              if (!r.vec || r.dim !== qv.length) continue
+              const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
+              let dot = 0; for (let k = 0; k < qv.length; k++) dot += qv[k] * v[k]
+              const cos = dot / (qn * (r.norm || 1))
+              const e = byId.get(r.note_id); if (e) e.cos = cos
+            }
+          }
+        }
+      } else {
+        // Multi-model: compute query embeddings for DeepInfra, Google, and Gemma; average cos across available backends per note
+        const qText = q
+        const diModel = getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'
+        const diDims = Number(getSetting('deepinfra_embed_dims') || '4096')
+        const diKey = getSetting('deepinfra_api_key') || process.env.DEEPINFRA_API_KEY || ''
+        const ggModel = getSetting('google_embed_model') || 'gemini-embedding-001'
+        const ggKey = getSetting('google_api_key') || process.env.GOOGLE_API_KEY || ''
+        const embDb = getEmbDb()
+
+        const qVecs: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; vec: Float32Array; qn: number }> = []
+        // DeepInfra
+        if (diKey && ((getSetting('enable_model_deepinfra') || '1') === '1')) {
+          try {
+            const body: any = { model: diModel, input: [qText], encoding_format: 'float' }
+            if (Number.isFinite(diDims) && diDims > 0) body.dimensions = diDims
+            const res = await fetch('https://api.deepinfra.com/v1/openai/embeddings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${diKey}` }, body: JSON.stringify(body) })
+            if (res.ok) {
+              const j = (await res.json()) as { data?: Array<{ embedding: number[] }> }
+              const emb = Array.isArray(j?.data) && j!.data![0]?.embedding ? j!.data![0].embedding : []
+              if (Array.isArray(emb) && emb.length > 0) { const v = new Float32Array(emb); let n=0; for (let i=0;i<v.length;i++) n+=v[i]*v[i]; qVecs.push({ backend:'deepinfra', model: diModel, vec: v, qn: Math.sqrt(n)||1 }) }
+            }
+          } catch {}
+        }
+        // Google
+        if (ggKey && ((getSetting('enable_model_google') || '1') === '1')) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(ggModel)}:embedContent?key=${encodeURIComponent(ggKey)}`
+            const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: { parts: [{ text: qText }] } }) })
+            if (res.ok) {
+              const j = await res.json()
+              const arr = (j?.embedding?.values || j?.embedding || [])
+              if (Array.isArray(arr) && arr.length > 0) { const v = new Float32Array(arr); let n=0; for (let i=0;i<v.length;i++) n+=v[i]*v[i]; qVecs.push({ backend:'google', model: ggModel, vec: v, qn: Math.sqrt(n)||1 }) }
+            }
+          } catch {}
+        }
+        // Gemma local
+        try {
+          const arr = await computeLocalEmbedding([qText], 'query')
+          const vec = Array.isArray(arr) && Array.isArray(arr[0]) ? new Float32Array(arr[0]) : null
+          if (vec && vec.length > 0 && ((getSetting('enable_model_gemma') || '1') === '1')) { let n=0; for (let i=0;i<vec.length;i++) n+=vec[i]*vec[i]; qVecs.push({ backend:'gemma', model: (getSetting('gemma_model_id') || 'onnx-community/embeddinggemma-300m-ONNX'), vec, qn: Math.sqrt(n)||1 }) }
+        } catch {}
+
+        if (qVecs.length > 0) {
+          const CHUNK = 900
+          for (let i = 0; i < needCos.length; i += CHUNK) {
+            const ids = needCos.slice(i, i + CHUNK)
+            const placeholders = ids.map(() => '?').join(',')
+            // For each backend, fetch corresponding vectors and compute cos, then average
+            const perId: Map<number, { sum: number; cnt: number; bd: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; cos: number }> }> = new Map()
+            for (const qm of qVecs) {
+              const rows = embDb.prepare(`SELECT note_id, dim, vec, norm FROM embeddings2 WHERE backend = ? AND model = ? AND note_id IN (${placeholders}) AND dim = ?`).all(qm.backend, qm.model, ...ids, qm.vec.length) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+              for (const r of rows) {
+                if (!r.vec || r.dim !== qm.vec.length) continue
+                const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
+                let dot = 0; for (let k = 0; k < qm.vec.length; k++) dot += qm.vec[k] * v[k]
+                const cos = dot / (qm.qn * (r.norm || 1))
+                const acc = perId.get(r.note_id) || { sum: 0, cnt: 0, bd: [] }
+                acc.sum += cos; acc.cnt += 1; acc.bd.push({ backend: qm.backend, model: qm.model, cos })
+                perId.set(r.note_id, acc)
+              }
+            }
+            for (const [id, a] of perId.entries()) {
+              const e = byId.get(id) as any
+              if (e && a.cnt > 0) { e.cos = a.sum / a.cnt; (e as any).__cos_breakdown__ = a.bd }
+            }
+          }
         }
       }
     }
   } catch {}
 
-  const out: Array<{ note_id: number; first_field: string | null; score: number; cos?: number; bm25?: number; matched?: number }> = []
+  const out: Array<{ note_id: number; first_field: string | null; score: number; cos?: number; bm25?: number; matched?: number; __cos_breakdown__?: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; cos: number }> }> = []
   const allIds = Array.from(byId.keys())
   const backBy = getBackFieldsForIds(allIds)
   for (const e of byId.values()) {
@@ -137,6 +213,7 @@ export async function hybridSemanticModulated(query: string, limit: number = 200
     const payload: any = { note_id: e.id, first_field: e.first ?? null, score, bm25, matched }
     // Always include cos and bm25 for UI tooltips; use 0 when missing
     payload.cos = typeof e.cos === 'number' ? e.cos : 0
+    if ((e as any).__cos_breakdown__) payload.__cos_breakdown__ = (e as any).__cos_breakdown__
     out.push(payload)
   }
   out.sort((a, b) => b.score - a.score)

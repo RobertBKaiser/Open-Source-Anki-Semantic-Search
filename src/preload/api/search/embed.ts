@@ -5,12 +5,15 @@ import { getHnswIndex } from '../../embeddings/hnsw'
 import { frontIsVisible } from '../../db/fields'
 import { searchByBm25Terms } from './bm25'
 import { stripHtmlToText } from '../../utils/text'
+import { computeLocalEmbedding } from '../../embeddings/gemma'
 
 // Related notes by embedding against a source note vector
 export async function getRelatedByEmbedding(noteId: number, minCos: number = 0.7, topK: number = 50): Promise<Array<{ note_id: number; first_field: string | null; cos: number }>> {
   try {
     const dbEmb = getEmbDb()
-    const rowQ = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings WHERE note_id = ?').get(noteId) as { note_id: number; dim: number; vec: Buffer; norm: number } | undefined
+    const backend = getSetting('embedding_backend') || 'deepinfra'
+    const model = backend === 'gemma' ? (getSetting('gemma_model_id') || 'onnx-community/embeddinggemma-300m-ONNX') : (getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B')
+    const rowQ = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings2 WHERE note_id = ? AND backend = ? AND model = ?').get(noteId, backend, model) as { note_id: number; dim: number; vec: Buffer; norm: number } | undefined
     if (!rowQ || !rowQ.vec || !rowQ.dim) return []
     const q = new Float32Array(rowQ.vec.buffer, rowQ.vec.byteOffset, rowQ.vec.byteLength / 4)
     const qnorm = rowQ.norm || 1
@@ -41,11 +44,11 @@ export async function getRelatedByEmbedding(noteId: number, minCos: number = 0.7
       for (let i = 0; i < candidates.length; i += CHUNK) {
         const ids = candidates.slice(i, i + CHUNK)
         const placeholders = ids.map(() => '?').join(',')
-        const part = dbEmb.prepare(`SELECT note_id, dim, vec, norm FROM embeddings WHERE note_id IN (${placeholders})`).all(...ids) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+        const part = dbEmb.prepare(`SELECT note_id, dim, vec, norm FROM embeddings2 WHERE backend = ? AND model = ? AND note_id IN (${placeholders})`).all(backend, model, ...ids) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
         rows.push(...part)
       }
     } else {
-      const iter = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings WHERE note_id != ?').iterate(noteId) as any
+      const iter = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings2 WHERE backend = ? AND model = ? AND note_id != ?').iterate(backend, model, noteId) as any
       for (const r of iter) rows.push(r)
     }
     const scores: Array<{ id: number; s: number }> = []
@@ -81,79 +84,41 @@ export async function embedSearch(query: string, topK = 200): Promise<Array<{ no
   const key = getSetting('deepinfra_api_key') || process.env.DEEPINFRA_API_KEY || ''
   const raw = String(query || '').trim()
   if (!raw) return []
-  const model = getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'
-  const dims = Number(getSetting('deepinfra_embed_dims') || '4096')
+  const diModel = getSetting('deepinfra_embed_model') || 'Qwen/Qwen3-Embedding-8B'
+  const diDims = Number(getSetting('deepinfra_embed_dims') || '4096')
+  const gemmaModel = getSetting('gemma_model_id') || 'onnx-community/embeddinggemma-300m-ONNX'
+  const googleModel = getSetting('google_embed_model') || 'gemini-embedding-001'
+  const multi = (getSetting('embedding_multi_model') || '0') === '1'
+
+  const logModel = backend === 'gemma' ? gemmaModel : backend === 'google' ? googleModel : diModel
+  const logDims = backend === 'deepinfra' ? diDims : backend === 'google' ? 3072 : backend === 'gemma' ? 768 : null
+  try {
+    console.log(`[embedSearch] backend=${backend} model=${logModel}${logDims ? ` dims=${logDims}` : ''} q='${raw}'`)
+  } catch {}
 
   // Offline fallback by averaging candidate embeddings
-  async function offlineFallback(): Promise<Array<{ note_id: number; first_field: string | null; rerank: number }>> {
-    try {
-      const dbMain = getDb()
-      const tokens = raw.toLowerCase().split(/[^a-z0-9]+/i).filter((w) => w && w.length >= 2)
-      const uniq: string[] = []
-      const seen = new Set<string>()
-      for (const w of tokens) { if (!seen.has(w)) { seen.add(w); uniq.push(w) } }
-      const capped = uniq.slice(0, 64)
-      if (capped.length === 0) return []
-      const BM_CAND = Math.min(800, Math.max(200, Math.floor(topK * 8)))
-      const bm = searchByBm25Terms(capped, BM_CAND)
-      if (bm.length === 0) return []
-      const dbEmb = getEmbDb()
-      const ids = bm.map((r) => r.note_id)
-      const CHUNK = 900
-      const vecs: Array<{ id: number; dim: number; vec: Float32Array; norm: number; first: string | null }> = []
-      for (let i = 0; i < ids.length; i += CHUNK) {
-        const slice = ids.slice(i, i + CHUNK)
-        const placeholders = slice.map(() => '?').join(',')
-        const rows = dbEmb.prepare(`SELECT note_id, dim, vec, norm FROM embeddings WHERE note_id IN (${placeholders})`).all(...slice) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
-        for (const r of rows) {
-          if (!r.vec || !Number.isFinite(r.dim)) continue
-          const v = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
-          vecs.push({ id: r.note_id, dim: r.dim, vec: v, norm: r.norm || 1, first: bm.find((x) => x.note_id === r.note_id)?.first_field ?? null })
-        }
-      }
-      if (vecs.length === 0) return bm.map((r) => ({ note_id: r.note_id, first_field: r.first_field, rerank: 0 }))
-      const dimCounts = new Map<number, number>()
-      for (const v of vecs) dimCounts.set(v.dim, (dimCounts.get(v.dim) || 0) + 1)
-      let modeDim = vecs[0].dim
-      let modeCnt = 0
-      for (const [d, c] of dimCounts.entries()) { if (c > modeCnt) { modeCnt = c; modeDim = d } }
-      const sameDim = vecs.filter((v) => v.dim === modeDim)
-      if (sameDim.length === 0) return []
-      const qv = new Float32Array(modeDim)
-      for (const { vec } of sameDim) { const len = Math.min(modeDim, vec.length); for (let i = 0; i < len; i++) qv[i] += vec[i] }
-      for (let i = 0; i < qv.length; i++) qv[i] /= sameDim.length
-      let qn = 0; for (let i = 0; i < qv.length; i++) qn += qv[i] * qv[i]
-      qn = Math.sqrt(qn) || 1
-      const vecById = new Map<number, { vec: Float32Array; norm: number; first: string | null }>()
-      for (const v of sameDim) vecById.set(v.id, { vec: v.vec, norm: v.norm || 1, first: v.first })
-      const scored: Array<{ note_id: number; first_field: string | null; cos: number }> = []
-      for (const r of bm) {
-        const vv = vecById.get(r.note_id)
-        if (!vv) continue
-        const len = Math.min(qv.length, vv.vec.length)
-        let dot = 0
-        for (let i = 0; i < len; i++) dot += qv[i] * vv.vec[i]
-        const cos = dot / (qn * (vv.norm || 1))
-        scored.push({ note_id: r.note_id, first_field: vv.first ?? r.first_field, cos })
-      }
-      scored.sort((a, b) => b.cos - a.cos)
-      return scored.map((s) => ({ note_id: s.note_id, first_field: s.first_field, rerank: s.cos })).filter((r) => frontIsVisible(r.first_field)).slice(0, Math.max(1, Math.min(100, topK)))
-    } catch { return [] }
+  async function offlineFallback(reason?: string): Promise<Array<{ note_id: number; first_field: string | null; rerank: number }>> {
+    const message = reason || 'Embedding query failed and fallback is disabled.'
+    try { console.error(`[embedSearch] ${message}`) } catch {}
+    throw new Error(message)
   }
 
-  // If backend is gemma or no DeepInfra key, compute local embedding for the query
-  if (backend === 'gemma' || !key) {
+  // If backend is gemma or no DeepInfra key, compute local embedding for the query (unless multi-model aggregation is enabled)
+  if (!multi && (backend === 'gemma' || (!key && backend !== 'google'))) {
     try {
       const qClean = stripHtmlToText(raw).slice(0, 1000)
-      const arr = await (globalThis as any).api?.computeLocalEmbedding?.([qClean], 'query')
+      const arr = await computeLocalEmbedding([qClean], 'query')
       const vec = Array.isArray(arr) && Array.isArray(arr[0]) ? new Float32Array(arr[0]) : null
-      if (!vec || vec.length === 0) return []
+      if (!vec || vec.length === 0) return offlineFallback('Local Gemma query embedding is empty.')
       // Full scan: match on dimension equality
       const dbEmb = getEmbDb()
+      const backend = 'gemma'
       const firstFieldStmt = getDb().prepare('SELECT value_html FROM note_fields WHERE note_id = ? ORDER BY ord ASC LIMIT 1')
       let qn = 0; for (let i = 0; i < vec.length; i++) qn += vec[i] * vec[i]
       qn = Math.sqrt(qn) || 1
-      const rows = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings WHERE dim = ?').all(vec.length) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+      const rows = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings2 WHERE backend = ? AND model = ? AND dim = ?').all(backend, gemmaModel, vec.length) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+      try { console.log(`[embedSearch.gemma] q_dim=${vec.length} db_rows=${rows?.length ?? 0}`) } catch {}
+      if (!rows || rows.length === 0) return offlineFallback('No Gemma document vectors match the query dimension.')
       const scores: Array<{ id: number; s: number }> = []
       for (const r of rows) {
         if (!r.vec) continue
@@ -170,55 +135,143 @@ export async function embedSearch(query: string, topK = 200): Promise<Array<{ no
         const row = firstFieldStmt.get(id) as { value_html?: string } | undefined
         return { note_id: id, first_field: row?.value_html ?? null, rerank: s }
       }).filter((r) => frontIsVisible(r.first_field))
+      if (!mapped || mapped.length === 0) return offlineFallback('Gemma cosine search returned no candidates.')
       return mapped
-    } catch { return offlineFallback() }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Gemma query embedding failed.'
+      return offlineFallback(message)
+    }
   }
 
-  // Online embed: ALWAYS embed the cleaned, capped query as a single input
+  // Online embed: DeepInfra or Google, with optional multi-model aggregation
   const qClean = stripHtmlToText(raw).slice(0, 1000)
   const inputs: string[] = [qClean]
   let qVec: Float32Array | null = null
+  const qVecs: Array<{ backend: 'deepinfra' | 'google' | 'gemma'; model: string; vec: Float32Array; qn: number }> = []
   try {
-    const res = await fetch('https://api.deepinfra.com/v1/openai/embeddings', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
-      body: JSON.stringify({ model, input: inputs, encoding_format: 'float', dimensions: dims })
-    })
-    if (!res.ok) return []
-    const j = (await res.json()) as { data?: Array<{ embedding: number[] }> }
-    const emb = Array.isArray(j?.data) && j!.data![0]?.embedding ? j!.data![0].embedding : []
-    if (!Array.isArray(emb) || emb.length === 0) return []
-    qVec = new Float32Array(emb)
-  } catch { return [] }
+    const gFetch = async (): Promise<Float32Array | null> => {
+      const gkey = getSetting('google_api_key') || process.env.GOOGLE_API_KEY || ''
+      if (!gkey) return null
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(googleModel)}:embedContent?key=${encodeURIComponent(gkey)}`
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: { parts: [{ text: qClean }] } }) })
+      if (!res.ok) return null
+      const j = await res.json()
+      const arr = (j?.embedding?.values || j?.embedding || [])
+      if (!Array.isArray(arr) || arr.length === 0) return null
+      return new Float32Array(arr)
+    }
+    const diFetch = async (): Promise<Float32Array | null> => {
+      if (!key) return null
+      const body: any = { model: diModel, input: inputs, encoding_format: 'float' }
+      if (Number.isFinite(diDims) && diDims > 0) body.dimensions = diDims
+      const res = await fetch('https://api.deepinfra.com/v1/openai/embeddings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+        body: JSON.stringify(body)
+      })
+      if (!res.ok) { try { console.warn(`[embedSearch.deepinfra] HTTP ${res.status}`) } catch {}; return null }
+      const j = (await res.json()) as { data?: Array<{ embedding: number[] }> }
+      const emb = Array.isArray(j?.data) && j!.data![0]?.embedding ? j!.data![0].embedding : []
+      if (!Array.isArray(emb) || emb.length === 0) { try { console.warn('[embedSearch.deepinfra] empty embedding in response') } catch {}; return null }
+      return new Float32Array(emb)
+    }
+    const gmFetch = async (): Promise<Float32Array | null> => {
+      try {
+        const arr = await computeLocalEmbedding([qClean], 'query')
+        const vec = Array.isArray(arr) && Array.isArray(arr[0]) ? new Float32Array(arr[0]) : null
+        if (!vec || vec.length === 0) {
+          throw new Error('Gemma query embedding returned empty vector')
+        }
+        return vec
+      } catch (err) {
+        try { console.error('[embedSearch.gemma] query embedding error', err) } catch {}
+        return null
+      }
+    }
+
+    if (multi) {
+      const enableDi = (getSetting('enable_model_deepinfra') || '1') === '1'
+      const enableGg = (getSetting('enable_model_google') || '1') === '1'
+      const enableGm = (getSetting('enable_model_gemma') || '1') === '1'
+      if (enableDi) {
+        const di = await diFetch()
+        if (di) { let n = 0; for (let i = 0; i < di.length; i++) n += di[i] * di[i]; qVecs.push({ backend: 'deepinfra', model: diModel, vec: di, qn: Math.sqrt(n) || 1 }) }
+      }
+      if (enableGg) {
+        const gg = await gFetch()
+        if (gg) { let n = 0; for (let i = 0; i < gg.length; i++) n += gg[i] * gg[i]; qVecs.push({ backend: 'google', model: googleModel, vec: gg, qn: Math.sqrt(n) || 1 }) }
+      }
+      if (enableGm) {
+        const gm = await gmFetch()
+        if (gm) { let n = 0; for (let i = 0; i < gm.length; i++) n += gm[i] * gm[i]; qVecs.push({ backend: 'gemma', model: gemmaModel, vec: gm, qn: Math.sqrt(n) || 1 }) }
+      }
+      if (qVecs.length === 0) return await offlineFallback('No query embeddings were generated for any enabled backend.')
+    } else if (backend === 'google') {
+      const gv = await gFetch(); if (!gv) return await offlineFallback('Google query embedding unavailable.'); qVec = gv
+    } else {
+      const dv = await diFetch(); if (!dv) return await offlineFallback('DeepInfra query embedding unavailable.'); qVec = dv
+      try { console.log(`[embedSearch.deepinfra] q_dim=${qVec.length}`) } catch {}
+    }
+  } catch (err) { return await offlineFallback(err instanceof Error ? err.message : 'Failed generating query embedding.') }
 
   // HNSW disabled per request. Always use DB cosine scan.
   const useHnsw = false
   const firstFieldStmt = getDb().prepare('SELECT value_html FROM note_fields WHERE note_id = ? ORDER BY ord ASC LIMIT 1')
-  if (!qVec) return offlineFallback()
-  let qn = 0; for (let i = 0; i < qVec.length; i++) qn += qVec[i] * qVec[i]
-  qn = Math.sqrt(qn) || 1
+  if (!multi && !qVec) return offlineFallback('Query embedding missing after preprocessing.')
+  let qn = 0; if (qVec) { for (let i = 0; i < qVec.length; i++) qn += qVec[i] * qVec[i]; qn = Math.sqrt(qn) || 1 }
 
   if (useHnsw) { /* disabled */ }
 
   // Full scan fallback: compute cosine against all vectors with matching dimension
   const dbEmb = getEmbDb()
-  const rows = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings WHERE dim = ?').all(dims) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
-  const scores: Array<{ id: number; s: number }> = []
-  for (const r of rows) {
-    if (!r.vec) continue
-    const vec = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
-    if (vec.length !== qVec.length) continue
-    let dot = 0
-    for (let i = 0; i < qVec.length; i++) dot += qVec[i] * vec[i]
-    const cos = dot / (qn * (r.norm || 1))
-    scores.push({ id: r.note_id, s: cos })
+  let picked: Array<{ id: number; s: number; bd?: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; cos: number }> }> = []
+  if (multi) {
+    const agg = new Map<number, { sum: number; cnt: number; bd: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; cos: number }> }>()
+    const backModels = qVecs
+    for (const qm of backModels) {
+      const rows = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings2 WHERE backend = ? AND model = ? AND dim = ?').all(qm.backend, qm.model, qm.vec.length) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+      if (!rows || rows.length === 0) continue
+      for (const r of rows) {
+        if (!r.vec) continue
+        const vec = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
+        if (vec.length !== qm.vec.length) continue
+        let dot = 0
+        for (let i = 0; i < qm.vec.length; i++) dot += qm.vec[i] * vec[i]
+        const cos = dot / (qm.qn * (r.norm || 1))
+        const a = agg.get(r.note_id) || { sum: 0, cnt: 0, bd: [] }
+        a.sum += cos; a.cnt += 1; a.bd.push({ backend: qm.backend, model: qm.model, cos })
+        agg.set(r.note_id, a)
+      }
+    }
+    const scores: Array<{ id: number; s: number; bd?: Array<{ backend: 'deepinfra'|'google'|'gemma'; model: string; cos: number }> }> = []
+    for (const [id, a] of agg.entries()) { if (a.cnt > 0) scores.push({ id, s: a.sum / a.cnt, bd: a.bd }) }
+    scores.sort((a, b) => b.s - a.s)
+    picked = scores.slice(0, Math.max(1, Math.min(100, topK)))
+  } else {
+    const backendSel = backend === 'google' ? 'google' : backend === 'gemma' ? 'gemma' : 'deepinfra'
+    const modelSel = backendSel === 'google' ? googleModel : backendSel === 'gemma' ? gemmaModel : diModel
+    const rows = dbEmb.prepare('SELECT note_id, dim, vec, norm FROM embeddings2 WHERE backend = ? AND model = ? AND dim = ?').all(backendSel, modelSel, qVec!.length) as Array<{ note_id: number; dim: number; vec: Buffer; norm: number }>
+    try { console.log(`[embedSearch.${backendSel}] db_rows=${rows?.length ?? 0} for dim=${qVec!.length}`) } catch {}
+    if (!rows || rows.length === 0) return offlineFallback('No embeddings found for the requested backend/model.')
+    const scores: Array<{ id: number; s: number }> = []
+    for (const r of rows) {
+      if (!r.vec) continue
+      const vec = new Float32Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength / 4)
+      if (vec.length !== qVec!.length) continue
+      let dot = 0
+      for (let i = 0; i < qVec!.length; i++) dot += qVec![i] * vec[i]
+      const cos = dot / (qn * (r.norm || 1))
+      scores.push({ id: r.note_id, s: cos })
+    }
+    scores.sort((a, b) => b.s - a.s)
+    picked = scores.slice(0, Math.max(1, Math.min(100, topK)))
   }
-  scores.sort((a, b) => b.s - a.s)
-  const picked = scores.slice(0, Math.max(1, Math.min(100, topK)))
-  const mapped = picked.map(({ id, s }) => {
+  const mapped = picked.map(({ id, s, bd }) => {
     const row = firstFieldStmt.get(id) as { value_html?: string } | undefined
-    return { note_id: id, first_field: row?.value_html ?? null, rerank: s }
+    const out: any = { note_id: id, first_field: row?.value_html ?? null, rerank: s }
+    if (multi && Array.isArray(bd)) out.__cos_breakdown__ = bd
+    return out
   }).filter((r) => frontIsVisible(r.first_field))
-  if (mapped.length === 0) return []
+  if (!mapped || mapped.length === 0) return offlineFallback('Cosine scoring produced no ranked results.')
   return mapped
 }
 
@@ -231,7 +284,7 @@ export async function getRelatedByEmbeddingTerms(terms: string[], topK: number =
       // Local path: embed each term and aggregate
       const termsClean = Array.isArray(terms) ? terms.map((t) => String(t || '').trim()).filter((t) => t.length > 0) : []
       if (termsClean.length === 0) return []
-      const embs = await (globalThis as any).api?.computeLocalEmbedding?.(termsClean, 'query')
+      const embs = await computeLocalEmbedding(termsClean, 'query')
       if (!Array.isArray(embs) || embs.length === 0) return []
       // BM25+cos aggregation (same as remote path)
       const bm = searchByBm25Terms(termsClean, Math.min(1000, Math.max(200, topK * 20)))
@@ -265,7 +318,6 @@ export async function getRelatedByEmbeddingTerms(terms: string[], topK: number =
           perNoteBest.set(r.note_id, Math.max(perNoteBest.get(r.note_id) || -Infinity, cos))
         }
       }
-      const firstBy = new Map<number, string | null>()
       const stmt = getDb().prepare('SELECT value_html FROM note_fields WHERE note_id = ? ORDER BY ord ASC LIMIT 1')
       const out: Array<{ note_id: number; first_field: string | null; cos: number }> = []
       for (const [id, cos] of perNoteBest.entries()) {
@@ -375,5 +427,3 @@ export async function getRelatedByEmbeddingTerms(terms: string[], topK: number =
     return final.map(({ id, cos }) => ({ note_id: id, first_field: firstBy.get(id) ?? null, cos })).filter((r) => frontIsVisible(r.first_field))
   } catch { return [] }
 }
-
-
